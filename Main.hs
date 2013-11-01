@@ -672,9 +672,6 @@ attackEntity atk def = do
       (Entity _ dep _ dn _ _  _ _ _ _) = def
   addMessage (if isPC def
     then "The " ++ an ++ " hits you!" else an ++ " hits the " ++ dn ++ "!")
-  if isPC def
-     then addMessage $ an ++ " hits you!"
-     else addMessage $ an ++ " hits the " ++ dn ++ "!"
   let en'  = modifyEntityAt en  dep (modifyEntityHp (-1))
       en'' = modifyEntityAt en' atp (addEntityTime (1000 `div` as))
   g' <- get
