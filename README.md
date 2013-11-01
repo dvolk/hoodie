@@ -2,6 +2,8 @@
 
 A small, toy roguelike in Haskell
 
+[Obligatory screenshot](http://i.imgur.com/b1dzGeZ.png)
+
 ## Instructions
 ### Downloading
 
