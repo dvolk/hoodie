@@ -2,19 +2,22 @@
 
 A small, toy roguelike in Haskell
 
-## Downloading
+## Instructions
+### Downloading
 
-git clone https://github.com/dvolk/hoodie
+    $ mkdir ~/src
+    $ cd ~/src
+    $ git clone https://github.com/dvolk/hoodie
 
-## Building
+### Building
 
-cd hoodie
-cabal configure
-cabal build
+    $ cd hoodie
+    $ cabal configure
+    $ cabal build
 
-## Running
+### Running
 
-./dist/build/hoodie/hoodie
+    $ ./dist/build/hoodie/hoodie
 
 ## Contributing
 
