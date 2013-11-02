@@ -87,8 +87,8 @@ data GameState = GameState
 -- | get the next actor and the rest
 entityPQ :: [Entity] -> (Entity, [Entity])
 entityPQ en = 
-  let pq = sortBy (comparing nextMove) en
-  in (head pq, tail pq)
+  let (p:ren) = sortBy (comparing nextMove) en 
+  in (p, ren)
 
 -- | get the player character and the rest
 getPC :: [Entity] -> (Entity, [Entity])
