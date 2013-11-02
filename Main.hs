@@ -23,8 +23,8 @@ type LevelPart  = [(Vector2, Char)] -- update for array
 -- then change dungeon to [dungeon] to allow many levels
 type Level      = Array Vector2 Char
 type Neighbours = Array Vector2 (Set.Set Vector2)
--- not implemented yet
-type Inventory  = (Object, Object) -- player can only carry a weapon and an armor
+-- player can carry 1 weapon, 1 armor and 1 misc item
+type Inventory  = (Item, Item, Item) 
 
 newtype GameT s m a = GameT (StateT s m a)
     deriving (Functor, Monad, MonadIO, MonadTrans, MonadState s)
@@ -42,38 +42,46 @@ curses = lift
 
 data Side = T | B | L | R -- room sides
 
-data ObjectType = Weapon 
-                | Armor deriving (Eq, Show, Read)
+data ItemType = Weapon -- ']'
+              | Armor  -- '['
+              | Potion -- '!'
+              deriving (Eq, Show, Read)
 
-data Object = Object
-    { oType    :: ObjectType
-    , oName    :: String
-    , oSpeed   :: Int
-    , oDamage  :: Int
-    , oDefence :: Int
+data ItemEffect = None
+                | Healing Int
+                deriving (Eq, Show, Read)
+
+data Item = Item
+    { iType    :: ItemType
+    , iName    :: String
+    , iSpeed   :: Int
+    , iDamage  :: Int
+    , iDefence :: Int
+    , iEffect  :: ItemEffect
     } deriving (Eq, Show, Read)
 
 data Entity = Entity
-    { pc       :: !Bool
-    , pos      :: !Vector2
-    , sym      :: !Char
-    , name     :: !String
-    , hp       :: !(Int, Int)
-    , inv      :: !Inventory
-    , speed    :: !Int
-    , nextMove :: !Int
-    , seenL    :: !(Array Vector2 Bool) -- ^what the player has seen of the level
-    , seeingL  :: !(Array Vector2 Bool) -- ^what the player *currently* sees
+    { pc       :: Bool
+    , pos      :: Vector2
+    , sym      :: Char
+    , name     :: String
+    , hp       :: (Int, Int)
+    , inv      :: Inventory
+    , speed    :: Int
+    , nextMove :: Int
+    , seenL    :: Array Vector2 Bool -- ^what the player has seen of the level
+    , seeingL  :: Array Vector2 Bool -- ^what the player *currently* sees
     } deriving (Eq, Show, Read)
 
 data GameState = GameState
-    { level    :: !Level
-    , entities :: ![Entity]
-    , msgs     :: ![(Int, Bool, String)] -- ^ turn added, string
-    , turn     :: !Int
-    , pquit    :: !Bool
-    , narr     :: !Neighbours
-    , dlvl     :: !Int
+    { level    :: Level
+    , entities :: [Entity]
+    , items    :: [(Vector2, Item)]
+    , msgs     :: [(Int, Bool, String)] -- ^ turn added, string
+    , turn     :: Int
+    , pquit    :: Bool
+    , narr     :: Neighbours
+    , dlvl     :: Int
     } deriving (Eq, Show, Read)
 
 -- | get the next actor and the rest
@@ -100,14 +108,28 @@ emptyL = listArray ((1,1), (80, 22)) (repeat ' ')
 nullA :: Array Vector2 Bool
 nullA = listArray ((1,1), (2,2)) (repeat False)
 
-noWeaponObject :: Object
-noWeaponObject = Object Weapon "none" 100 1 0
+testWeaponItem, testWeaponItem', testWeaponItem'' :: Item
+testWeaponItem   = Item Weapon "Sword of Test +1" 100 1 0 None
+testWeaponItem'  = Item Weapon "Shard of Glass" 100 1 0 None
+testWeaponItem'' = Item Weapon "Staff of Skepticism" 100 1 0 None
 
-noArmorObject :: Object
-noArmorObject = Object Armor "none" 100 0 1
+testArmorItem, testArmorItem', testArmorItem'' :: Item
+testArmorItem   = Item Armor "Tested Leather Armor" 100 0 1 None
+testArmorItem'  = Item Armor "Fancy Suit" 100 0 1 None
+testArmorItem'' = Item Armor "Power Armor mk2" 100 0 1 None
+
+testMiscItem, testMiscItem', testMiscItem'' :: Item
+testMiscItem   = Item Potion "Homeopathic Potion" 100 1 0 (Healing 0)
+testMiscItem'  = Item Potion "Potion of Alcohol" 100 1 0 (Healing (-1))
+testMiscItem'' = Item Potion "Potion" 100 1 0 None
+
+testItems :: [Item]
+testItems = [testWeaponItem, testWeaponItem', testWeaponItem''
+            ,testArmorItem, testArmorItem', testArmorItem''
+            ,testMiscItem, testMiscItem', testMiscItem'']
 
 nullInv :: Inventory
-nullInv = (noWeaponObject, noArmorObject)
+nullInv = (testWeaponItem, testArmorItem, testMiscItem)
 
 -- to save disk space, the neighbours array could be discarded here
 -- and then rebuilt on load
@@ -131,8 +153,12 @@ mkPlayer p' =
          , seeingL  = listArray ((1,1), (80,22)) (repeat False)
          }
 
-mkEnemiesOnLevel :: Int -> Level -> IO [Entity]
-mkEnemiesOnLevel dl l' = do
+mkEnemiesOnLevel :: Int -- number of enemies
+                 -> Int -- nextMove of enemies, set to the nextMove of the player
+                 -- when descending the dungeon
+                 -> Level 
+                 -> IO [Entity]
+mkEnemiesOnLevel dl nm l' = do
   en <- randomRIO (1 * dl, 3 * dl)
   es <- randFloors l' en
   ep <- randFloor l' 
@@ -145,21 +171,24 @@ mkEnemiesOnLevel dl l' = do
       speeds = cycle [50, 99, 101, 120, 95, 85]
       hps    = cycle [(5,5), (7,7), (8,8), (13,13), (3,3), (1,1)]
   return $ b ++ 
-    zipWith5 (\p c n s h -> Entity False p c n h nullInv s 0 nullA nullA) 
+    zipWith5 (\p c n s h -> Entity False p c n h nullInv s nm nullA nullA) 
       es syms names speeds hps
 
 -- | Creates a brand-new, fully filled Game.
 mkDungeonLevel :: Game ()
 mkDungeonLevel = do
-  l   <- io $ mkRandRooms (80, 22)
-  p   <- io $ randFloor l -- player
-  ep  <- io $ randFloor l
+  l  <- io $ mkRandRooms (80, 22)
+  p  <- io $ randFloor l -- player
+  ep <- io $ randFloor l
+  ip <- io $ randFloors l 7
   let turn' = 0
       dlvl' = 1
       p'    = mkPlayer p
-  entities' <- io $ mkEnemiesOnLevel dlvl' l
+      itms  = zip ip (cycle testItems)
+  entities' <- io $ mkEnemiesOnLevel dlvl' 0 l
   put GameState
-    { entities  = p' : entities' 
+    { entities = p' : entities' 
+    , items    = itms
     , level    = l // [(ep, '>')]
     , msgs     = [(0, False, "Welcome to hoodie! (press ? for help)")]
     , turn     = turn'
@@ -176,17 +205,20 @@ descendLevel = do
   l      <- io $ mkRandRooms (80, 22)
   pp     <- io $ randFloor l -- player
   ep     <- io $ randFloor l -- exit
+  ip <- io $ randFloors l 7
   let dlvl' = dlvl g + 1
       p'    = p { pos     = pp
                 , seenL   = listArray ((1,1), (80,22)) (repeat False)
                 , seeingL = listArray ((1,1), (80,22)) (repeat False)
                 }
-  entities' <- io $ mkEnemiesOnLevel dlvl' l
+      itms  = zip ip (cycle testItems)
+  entities' <- io $ mkEnemiesOnLevel dlvl' (nextMove p + 1) l
   put $ g
     { entities = p' : entities' 
                  -- level 5 is the last level
     , level    = if dlvl' == 5 then l else l // [(ep, '>')]
     , narr     = mkNeighbourArray l ".⋅+#SDk"
+    , items    = itms
     , dlvl     = dlvl'
     }
 
@@ -405,6 +437,7 @@ walkableL l p@(x,y) =
   let ((x1,y1), (x2,y2)) = bounds l
    in (x < x2 || x > x1 || y < y2 || y > y1) && (l ! p `elem` ".⋅+#SDk>")
 
+-- TODO: this needs to be fixed to account for messages over 75 chars
 displayMessageLog :: Game ()
 displayMessageLog = do
   g <- get
@@ -413,7 +446,7 @@ displayMessageLog = do
     clear (bounds (level g))
     drawStringAt (1,1) "Message log: ('p' to return)"
     forM_ (zip [3..] (take (y2 - 5) (msgs g))) $ \(n,(t,_,m)) ->
-      drawStringAt (x1, n) $ take (x2 - 5) "[turn " ++ show t ++ "] " ++ m
+      drawStringAt (x1, n) $ take (x2 - 5) "[" ++ show t ++ "] " ++ m
   _ <- curses $ waitForChrs "p"
   curses $ draw (clear (bounds (level g)))
 
@@ -423,6 +456,8 @@ helpString = ["Hello, hoodie here (press ? again to return)"
              ,"Move with the Vi keys: hijkyubn"
              ,"Attack by moving into enemies"
              ,"Wait for a turn by pressing ."
+             ,"i to look at your inventory"
+             ,", to pick up items below you"
              ,"Descend to the next level with > when you are on stairs"
              ,"Press p to display the message log,"
              ,""
@@ -438,15 +473,28 @@ displayHelp = do
   _ <- curses $ waitForChrs "?"
   curses $ draw (clear (bounds (level g)))
 
+displayPlayerInventory :: Game ()
+displayPlayerInventory = do
+  (w,a,m) <- (inv . fst . getPC) `fmap` gets entities
+  addMessage $ "Inventory: W: " ++ iName w ++
+               " A: " ++ iName a ++
+               " M: " ++ iName m 
+
 withReverse :: Update () -> Update ()
 withReverse upact = do
   setAttribute AttributeReverse True
   upact
   setAttribute AttributeReverse False
 
+itemSym :: Item -> Char
+itemSym i = case iType i of
+  Weapon -> ']'
+  Armor  -> '['
+  Potion -> '!'
+
 drawEverything :: Game ()
 drawEverything  = do
-  (GameState l en ms _ _ _ dl) <- get
+  (GameState l en itms ms _ _ _ dl) <- get
   let (Entity _ pp _ _ (chp,mhp) _ sp nextmove seen seeing, en') = getPC en
   curses $ draw $ do
     clear (bounds l)
@@ -458,11 +506,15 @@ drawEverything  = do
         (withReverse (drawStringAt i [l ! i])))
     -- draw whole level, for debugging:
 --    forM_ (indices l) $ \i -> drawStringAt i [l ! i]
+    -- draw items
+    forM_ itms $ \(ip,i) -> 
+      when (seeing ! ip) $
+        drawStringAt ip [itemSym i]
     -- draw enemies
     forM_ en' (\(Entity _ i c _ _ _ _ _ _ _) ->
       when (seeing ! i) 
         (drawStringAt i [c]))
---    forM_ en (\(Entity _ i c _ _ _ _ _ _) -> drawStringAt i [c])
+--    forM_ en (\(Entity _ i c _ _ _ _ _ _ _) -> drawStringAt i [c])
     -- draw player
     withReverse $ drawStringAt pp "@"
     -- concat unseen messages and draw them
@@ -496,7 +548,7 @@ movePlayer' en new_p_pos =
 -- | move the player, or attack an enemy if we're moving into one
 movePlayer :: Char -> Game ()
 movePlayer c = do
-  g@(GameState l en _ _ _ _ _) <- get
+  g@(GameState l en _ _ _ _ _ _) <- get
   let (p,en') = getPC en
       dir = case c of
         'k' -> above
@@ -566,7 +618,7 @@ updateSeen old_seen new_seeing = do
 
 -- | update the "seen" and "seeing" arrays
 updateVision' :: GameState -> IO GameState
-updateVision' game'@(GameState l en _ _ _ _ _) = do
+updateVision' game'@(GameState l en _ _ _ _ _ _) = do
   let (pl@(Entity _ p _ _ _ _ _ _ seen _), en') = getPC en
   (seeing',seen') <- do
     s <- ioInit
@@ -586,7 +638,7 @@ updateVision' game'@(GameState l en _ _ _ _ _) = do
   return game
 
 getGoodCh :: Game Char
-getGoodCh = curses $ waitForChrs "?hjklyubnqsdpr.>" 
+getGoodCh = curses $ waitForChrs "?hjklyubnqsdpri.,>" 
 
 setQuit :: Game ()
 setQuit = do 
@@ -616,9 +668,9 @@ setTurn = do
   
 gameTurn :: Game ()
 gameTurn = do
-  g <- get
   setTurn
   pruneNegativeHpEnemies
+  g <- get
   let en@(e, _) = entityPQ (entities g)
   if isPC e 
     then do
@@ -629,14 +681,47 @@ gameTurn = do
         'q' -> setQuit
         'p' -> displayMessageLog
         '?' -> displayHelp
---        's' -> save
---        'd' -> load
+        ',' -> playerPickupItem
+        'i' -> displayPlayerInventory
+        's' -> save
+        'd' -> load
         'r' -> mkDungeonLevel >> updateVision
         '.' -> playerIdle
         '>' -> descend >> updateVision
         _   -> movePlayer c >> updateVision
     else processEnemies en
   isPlayerDead
+  
+playerPickupItem :: Game ()
+playerPickupItem = do
+  g <- get
+      -- items on the floor
+  let is           = items g
+      -- player and friends
+      (p, en)      = getPC (entities g)
+      -- current inventory
+      (pw, pa, pm) = inv p
+  -- is there an item below us?
+  case pos p `lookup` is of
+    Nothing -> 
+       addMessage "There's nothing here to pick up!"
+    Just i  -> do 
+          -- make a new inventory based on the type of the item
+      let newinv = case iType i of
+           Weapon -> (i, pa, pm)
+           Armor  -> (pw, i, pm)
+           _      -> (pw, pa, i)
+          -- item we're dropping from the player's inventory
+          dropped = case iType i of
+           Weapon -> pw
+           Armor  -> pa
+           _      -> pm
+      -- commit new inventory, remove the item from the floor
+      -- and add the dropped item to the floor at the player's feet
+      put $ g { entities = p { inv = newinv } : en 
+              , items    = (pos p, dropped) : filter (/= (pos p, i)) is 
+              }
+      addMessage $ "You pick up the " ++ iName i ++ "!"
 
 ageMessages :: Game ()
 ageMessages = do
@@ -731,7 +816,7 @@ moveEntityAI :: [Entity]  -- rest of the enemies
              -> Entity    -- the entity we're moving
              -> Game () 
 moveEntityAI en' e = do
-  g@(GameState l en _ _ _ _ _) <- get
+  g@(GameState l en _ _ _ _ _ _) <- get
   let (Entity _ pp _ _ _ _ _ _ _ _) = fst (getPC en)
       (Entity _ ep _ _ _ _ _ _ _ _) = e
       -- sort the movement functions by the distance that they would
