@@ -108,14 +108,14 @@ nullA :: Array Vector2 Bool
 nullA = listArray ((1,1), (2,2)) (repeat False)
 
 testWeaponItem, testWeaponItem', testWeaponItem'' :: Item
-testWeaponItem   = Item Weapon "Sword of Test +1" 100 1 0 None
-testWeaponItem'  = Item Weapon "Shard of Glass" 100 1 0 None
-testWeaponItem'' = Item Weapon "Staff of Skepticism" 100 1 0 None
+testWeaponItem   = Item Weapon "Sword of Test +1" 100 4 0 None
+testWeaponItem'  = Item Weapon "Shard of Glass" 150 2 0 None
+testWeaponItem'' = Item Weapon "Staff of Skepticism" 50 10 0 None
 
 testArmorItem, testArmorItem', testArmorItem'' :: Item
 testArmorItem   = Item Armor "Tested Leather Armor" 100 0 1 None
-testArmorItem'  = Item Armor "Fancy Suit" 100 0 1 None
-testArmorItem'' = Item Armor "Power Armor mk2" 100 0 1 None
+testArmorItem'  = Item Armor "Fancy Suit" 150 0 0 None
+testArmorItem'' = Item Armor "Power Armor mk2" 66 0 6 None
 
 testMiscItem, testMiscItem', testMiscItem'' :: Item
 testMiscItem   = Item Potion "Homeopathic Potion" 100 1 0 (Healing 0)
@@ -144,7 +144,7 @@ mkPlayer p' =
          , name     = "Player"
          , pos      = p'
          , sym      = '@'
-         , hp       = (12, 12)
+         , hp       = (20, 20)
          , inv      = nullInv
          , speed    = 100
          , nextMove = 0
@@ -538,39 +538,47 @@ aboveright (x, y) = (x + 1, y - 1)
 belowleft  (x, y) = (x - 1, y + 1)
 belowright (x, y) = (x + 1, y + 1)
 
-movePlayer' :: [Entity] -> Vector2 -> [Entity]
-movePlayer' en new_p_pos = 
-  let (p,es) = getPC en
-      p' = p { pos = new_p_pos, nextMove = nextMove p + 1000 `div` speed p }
-  in p':es
+getEntityArmor :: Entity -> Item
+getEntityArmor e = let (_, a, _) = inv e in a
+
+movePlayerTo :: Vector2 -> Game ()
+movePlayerTo new_p_pos = do
+  g <- get
+  let -- player and friends
+      (p,es) = getPC (entities g)
+      -- player's move cost is the average of their speed and the armor's speed
+      mCost = 1000 `div` ((iSpeed (getEntityArmor p) + speed p) `div` 2)
+      p' = p { pos = new_p_pos, nextMove = nextMove p + mCost }
+  put $ g { entities = p':es }
+
+-- | maps directional keys to movement functions
+keyToDir :: Char -> Vector2 -> Vector2
+keyToDir c = 
+  case c of
+    'k' -> above
+    'j' -> below
+    'l' -> right
+    'h' -> left
+    'y' -> aboveleft
+    'u' -> aboveright
+    'b' -> belowleft
+    'n' -> belowright
+    _   -> error "movePlayer: controls misconfigured"
 
 -- | move the player, or attack an enemy if we're moving into one
 movePlayer :: Char -> Game ()
 movePlayer c = do
-  g@(GameState l en _ _ _ _ _ _) <- get
+  l  <- gets level
+  en <- gets entities
   let (p,en') = getPC en
-      dir = case c of
-        'k' -> above
-        'j' -> below
-        'l' -> right
-        'h' -> left
-        'y' -> aboveleft
-        'u' -> aboveright
-        'b' -> belowleft
-        'n' -> belowright
-        _   -> error "movePlayer: controls misconfigured"
+      dir     = keyToDir c
   case en' `getEntityAt` dir (pos p) of
       -- we're moving into an enemy
-      Just (Entity _ _ _ n' _ _ _ _ _ _) -> do
-        addMessage ("You hit the " ++ n' ++ "!")
-        g' <- get
-        let en''  = modifyEntityAt en   (dir (pos p)) (modifyEntityHp (-1))
-            en''' = modifyEntityAt en'' (pos p)       idleEntity
-        put g' { entities = en''' }
+      Just e -> attackEntity p e
       -- or not
       Nothing ->
         if l `walkableL` dir (pos p)
-          then put $ g { entities = movePlayer' en (dir (pos p)) }
+          then movePlayerTo (dir (pos p))
           else addMessage "You bump into an obstacle!"
 
 modifyEntityAt :: [Entity] -> Vector2 -> (Entity -> Entity) -> [Entity]
@@ -749,19 +757,35 @@ processEnemies (e, en) = do
 -- add messages 
 attackEntity :: Entity -- attacker
              -> Entity -- defender
-             -> Game () -- new defender
+             -> Game ()
 attackEntity atk def = do
   en <- gets entities
-  let (Entity _ atp _ an _ _ as _ _ _) = atk
-      (Entity _ dep _ dn _ _  _ _ _ _) = def
-  addMessage (if isPC def
-    then "The " ++ an ++ " hits you!" else an ++ " hits the " ++ dn ++ "!")
-  let en'  = modifyEntityAt en  dep (modifyEntityHp (-1))
-      en'' = modifyEntityAt en' atp (addEntityTime (1000 `div` as))
+  let -- attacker and defender stats
+      (Entity _ atp _ an _ ainv _ _ _ _) = atk
+      (Entity _ dep _ dn _ dinv _ _ _ _) = def
+      -- inventories of the attacker and defender
+      (aw, _, _) = ainv
+      (_, da, _) = dinv
+      -- damage done from attacker to defender is attacker's weapon attack
+      -- value minus defender's armor's defend value
+      dmg   = 
+        let dmg' = iDamage aw - iDefence da
+        in if dmg' <= 0 then 0 else dmg'
+      -- attack cost is the average of the attacker's speed and their weapon's
+      -- speed
+      aCost = 1000 `div` ((iSpeed aw + speed atk) `div` 2)
+  -- add messages
+  when (isPC def) $ addMessage $ "The " ++ an ++ " hits you!"
+  when (isPC atk) $ addMessage $ "You hit the " ++ dn ++ "!"
+  unless (isPC def || isPC atk) $
+    addMessage $ "The " ++ an ++ "hits the " ++ dn ++ "!"
+  let en'  = modifyEntityAt en  dep (modifyEntityHp (-dmg))
+      en'' = modifyEntityAt en' atp (addEntityTime aCost)
   g' <- get
   put $ g' { entities = en'' }
 
--- | remove entities that have <= 0 current hitpoints
+-- | remove entities that have <= 0 current hitpoints and add messages about
+-- their deaths
 pruneNegativeHpEnemies :: Game ()
 pruneNegativeHpEnemies = do
   g <- get
