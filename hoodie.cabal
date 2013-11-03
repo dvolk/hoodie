@@ -26,7 +26,6 @@ executable hoodie
                      , array ==0.4.*
                      , containers ==0.5.*
                      , random ==1.0.*
-                     , lens ==3.10.*
                      , monad-loops ==0.4.*
                      , astar ==0.2.*
                      , ncurses ==0.2.*

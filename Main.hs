@@ -1,7 +1,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Main where
 
--- base, mtl, array, containers, random, lens, monad-loops, ncurses, astar, hfov
+-- base, mtl, array, containers, random, monad-loops, ncurses, astar, hfov
 import Control.Monad.State
 import Data.Array.IArray
 import Data.Array.IO
@@ -10,7 +10,6 @@ import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Maybe
 import System.Random
-import Control.Lens hiding (Level, indices)
 import Control.Monad.Loops (iterateUntil)
 import Data.Graph.AStar (aStar)
 import UI.NCurses
@@ -730,9 +729,9 @@ ageMessages = do
   -- if I used lenses completely:
   -- msgs %= map (_2 .~ True) 
   -- using lenses partially:
-  put $ g { msgs = map (_2 .~ True) (msgs g) }
+  -- put $ g { msgs = map (_2 .~ True) (msgs g) }
   -- normal record update:
-  -- put $ g { msgs = map (\(t,_,m) -> (t, True, m)) (msgs g) }
+  put $ g { msgs = map (\(t,_,m) -> (t, True, m)) (msgs g) }
 
 updateVision :: Game ()
 updateVision = get >>= io . updateVision' >>= put
