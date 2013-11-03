@@ -541,16 +541,6 @@ belowright (x, y) = (x + 1, y + 1)
 getEntityArmor :: Entity -> Item
 getEntityArmor e = let (_, a, _) = inv e in a
 
-movePlayerTo :: Vector2 -> Game ()
-movePlayerTo new_p_pos = do
-  g <- get
-  let -- player and friends
-      (p,es) = getPC (entities g)
-      -- player's move cost is the average of their speed and the armor's speed
-      mCost = 1000 `div` ((iSpeed (getEntityArmor p) + speed p) `div` 2)
-      p' = p { pos = new_p_pos, nextMove = nextMove p + mCost }
-  put $ g { entities = p':es }
-
 -- | maps directional keys to movement functions
 keyToDir :: Char -> Vector2 -> Vector2
 keyToDir c = 
@@ -565,20 +555,19 @@ keyToDir c =
     'n' -> belowright
     _   -> error "movePlayer: controls misconfigured"
 
--- | move the player, or attack an enemy if we're moving into one
 movePlayer :: Char -> Game ()
 movePlayer c = do
   l  <- gets level
   en <- gets entities
   let (p,en') = getPC en
-      dir     = keyToDir c
-  case en' `getEntityAt` dir (pos p) of
+      newp    = (keyToDir c) (pos p)
+  case en' `getEntityAt` newp of
       -- we're moving into an enemy
       Just e -> attackEntity p e
       -- or not
       Nothing ->
-        if l `walkableL` dir (pos p)
-          then movePlayerTo (dir (pos p))
+        if l `walkableL` newp
+          then p `moveEntityTo` newp
           else addMessage "You bump into an obstacle!"
 
 modifyEntityAt :: [Entity] -> Vector2 -> (Entity -> Entity) -> [Entity]
@@ -652,12 +641,12 @@ setQuit = do
   g <- get
   put $ g { pquit = True }
 
+-- | Idle just means moving to the position we're on already
 playerIdle :: Game ()
 playerIdle = do
   g <- get
-  let (p, en) = getPC (entities g)
-      p' = idleEntity p
-  put $ g { entities = p':en }
+  let (p, _) = getPC (entities g)
+  p `moveEntityTo` (pos p)
 
 isPlayerDead :: Game ()
 isPlayerDead = do
@@ -822,16 +811,20 @@ nextTo a b = any (\f -> a == f b) directions
 (^+^) :: Vector2 -> Vector2 -> Vector2
 (x1, y1) ^+^ (x2, y2) = (x1 + x2, y1 + y2)
 
-moveEntityTo :: Entity -> Vector2 -> Entity
-moveEntityTo e new = e 
-  { pos = new,
-    nextMove = nextMove e + 1000 `div` speed e}
+restOfEntities :: Entity -> [Entity] -> [Entity]
+restOfEntities e = filter (/= e)
+
+moveEntityTo :: Entity -> Vector2 -> Game ()
+moveEntityTo e newp = do
+  g  <- get 
+  let rest     = filter (/= e) (entities g)
+      moveCost = 1000 `div` ((speed e + iSpeed (getEntityArmor e)) `div` 2)
+      newE     = e { pos = newp
+                   , nextMove = nextMove e + moveCost }
+  put $ g { entities = newE : rest }
 
 addEntityTime :: Int -> Entity -> Entity
 addEntityTime n e = e { nextMove = nextMove e + n }
-
-idleEntity :: Entity -> Entity
-idleEntity e = e { nextMove = nextMove e + 1000 `div` speed e}
 
 -- | make a list of functions sorted by the distance that they would bring
 -- the enemy to if it moved in that direction, then select the first good one
@@ -839,7 +832,7 @@ moveEntityAI :: [Entity]  -- rest of the enemies
              -> Entity    -- the entity we're moving
              -> Game () 
 moveEntityAI en' e = do
-  g@(GameState l en _ _ _ _ _ _) <- get
+  (GameState l en _ _ _ _ _ _) <- get
   let (Entity _ pp _ _ _ _ _ _ _ _) = fst (getPC en)
       (Entity _ ep _ _ _ _ _ _ _ _) = e
       -- sort the movement functions by the distance that they would
@@ -859,8 +852,8 @@ moveEntityAI en' e = do
             -- enemies have a detection radius of 10
       newp = if cartDistance ep pp < 10
                  then e `moveEntityTo` bestfunc ep
-                 else idleEntity e
-  put $ g { entities = modifyEntityAt en ep (const newp) }
+                 else e `moveEntityTo` ep
+  newp
 
 quitCond :: Game Bool
 quitCond = liftM pquit get
