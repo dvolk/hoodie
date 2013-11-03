@@ -553,8 +553,10 @@ keyToDir c =
     'u' -> aboveright
     'b' -> belowleft
     'n' -> belowright
+    '.' -> id
     _   -> error "movePlayer: controls misconfigured"
 
+-- | Move the player, fail to move the player, rest, or attack an entity
 movePlayer :: Char -> Game ()
 movePlayer c = do
   l  <- gets level
@@ -641,13 +643,7 @@ setQuit = do
   g <- get
   put $ g { pquit = True }
 
--- | Idle just means moving to the position we're on already
-playerIdle :: Game ()
-playerIdle = do
-  g <- get
-  let (p, _) = getPC (entities g)
-  p `moveEntityTo` (pos p)
-
+-- | Checks if the player is dead and quits if they are.
 isPlayerDead :: Game ()
 isPlayerDead = do
   en <- gets entities 
@@ -656,20 +652,27 @@ isPlayerDead = do
     addMessage "Oh no! You are dead!"
     setQuit
 
+-- | Turn or time is a measure of how long the player has been in the dungeon.
+-- An entity with 100 speed and 100 speed armor takes 10 "time" to move one
+-- square. Higher speed = less time taken.
 setTurn :: Game ()
 setTurn = do
   g <- get
   let p = fst . getPC $ entities g
   put $ g { turn = nextMove p }
   
+-- | This is the main update function, updating one entity per call. The
+-- entity to be updated is the one with the lowest nextMove value. When the
+-- entity perform a task (including nothing at all), the time cost of the task
+-- is added to its nextMove. "turn" is used for the lack of a better word.
 gameTurn :: Game ()
 gameTurn = do
-  setTurn
   pruneNegativeHpEnemies
   g <- get
   let en@(e, _) = entityPQ (entities g)
   if isPC e 
     then do
+      setTurn
       drawEverything
       ageMessages
       c <- getGoodCh
@@ -682,12 +685,12 @@ gameTurn = do
         's' -> save
         'd' -> load
         'r' -> mkDungeonLevel >> updateVision
-        '.' -> playerIdle
         '>' -> descend >> updateVision
         _   -> movePlayer c >> updateVision
     else processEnemies en
   isPlayerDead
   
+-- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
 playerPickupItem = do
   g <- get
@@ -719,15 +722,10 @@ playerPickupItem = do
               }
       addMessage $ "You pick up the " ++ iName i ++ "!"
 
+-- | After one turn, set messages to viewed so they don't display any more
 ageMessages :: Game ()
 ageMessages = do
   g <- get
-  -- are lenses worth it?
-  -- if I used lenses completely:
-  -- msgs %= map (_2 .~ True) 
-  -- using lenses partially:
-  -- put $ g { msgs = map (_2 .~ True) (msgs g) }
-  -- normal record update:
   put $ g { msgs = map (\(t,_,m) -> (t, True, m)) (msgs g) }
 
 updateVision :: Game ()
@@ -808,16 +806,13 @@ distances a b =
 nextTo :: Vector2 -> Vector2 -> Bool
 nextTo a b = any (\f -> a == f b) directions
 
-(^+^) :: Vector2 -> Vector2 -> Vector2
-(x1, y1) ^+^ (x2, y2) = (x1 + x2, y1 + y2)
-
-restOfEntities :: Entity -> [Entity] -> [Entity]
-restOfEntities e = filter (/= e)
-
 moveEntityTo :: Entity -> Vector2 -> Game ()
 moveEntityTo e newp = do
   g  <- get 
+      -- the rest of the entities
   let rest     = filter (/= e) (entities g)
+      -- move cost is the average of the speed of the entity and the 
+      -- speed of the armor
       moveCost = 1000 `div` ((speed e + iSpeed (getEntityArmor e)) `div` 2)
       newE     = e { pos = newp
                    , nextMove = nextMove e + moveCost }
@@ -832,9 +827,12 @@ moveEntityAI :: [Entity]  -- rest of the enemies
              -> Entity    -- the entity we're moving
              -> Game () 
 moveEntityAI en' e = do
-  (GameState l en _ _ _ _ _ _) <- get
-  let (Entity _ pp _ _ _ _ _ _ _ _) = fst (getPC en)
-      (Entity _ ep _ _ _ _ _ _ _ _) = e
+  l  <- gets level
+  en <- gets entities
+      -- player position
+  let pp = pos (fst (getPC en))
+      -- entity position
+      ep = pos e
       -- sort the movement functions by the distance that they would
       -- bring the enemy to if it moved into that direction
       sorted_funs = map snd $ sortBy (comparing fst)
@@ -858,22 +856,10 @@ moveEntityAI en' e = do
 quitCond :: Game Bool
 quitCond = liftM pquit get
 
-runGame :: (Curses GameState -> IO GameState) -- ^ Curses init & wrapper
-        -> (GameState -> Bool)           -- ^ end condition
-        -> (GameState -> Curses GameState)    -- ^ turn function
-        -> GameState                     -- ^ starting game state
-        -> IO GameState                  -- ^ end state
-runGame initf predf logicf sgame = do
-  let loop' game =
-        if predf game
-          then return game
-          else logicf game >>= loop'
-  initf $ loop' sgame
-
-runGame' :: Game Bool  -- ^ end condition
-         -> Game ()    -- ^ update function
-         -> IO GameState -- ^ end state
-runGame' predf logicf = do
+runGame :: Game Bool  -- ^ end condition
+        -> Game ()    -- ^ update function
+        -> IO GameState -- ^ end state
+runGame predf logicf = do
   let loop' = do
         doquit <- predf
         if doquit
@@ -887,13 +873,10 @@ runGame' predf logicf = do
       updateVision
       loop'
 
-
 main :: IO ()
 main = do
-  g <- runGame' quitCond gameTurn
-
+  g <- runGame quitCond gameTurn
   mapM_ print (reverse (msgs g))
-
 
 ioInit :: IO Settings
 ioInit = do
