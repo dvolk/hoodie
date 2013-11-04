@@ -5,7 +5,7 @@ module Main where
 import Control.Monad.State
 import Data.Array.IArray
 import Data.Array.IO
-import Data.List (sortBy, find, zipWith5)
+import Data.List (sortBy, find, zipWith6)
 import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Maybe
@@ -76,7 +76,7 @@ data GameState = GameState
     { level    :: Level
     , entities :: [Entity]
     , items    :: [(Vector2, Item)]
-    , msgs     :: [(Int, Bool, String)] -- ^ turn added, string
+    , msgs     :: [(Int, Bool, String)] -- ^ turn added, seen by player, message
     , turn     :: Int
     , pquit    :: Bool
     , narr     :: Neighbours
@@ -107,28 +107,34 @@ emptyL = listArray ((1,1), (80, 22)) (repeat ' ')
 nullA :: Array Vector2 Bool
 nullA = listArray ((1,1), (2,2)) (repeat False)
 
-testWeaponItem, testWeaponItem', testWeaponItem'' :: Item
-testWeaponItem   = Item Weapon "Sword of Test +1" 100 4 0 None
-testWeaponItem'  = Item Weapon "Shard of Glass" 150 2 0 None
-testWeaponItem'' = Item Weapon "Staff of Skepticism" 50 10 0 None
 
-testArmorItem, testArmorItem', testArmorItem'' :: Item
-testArmorItem   = Item Armor "Tested Leather Armor" 100 0 1 None
-testArmorItem'  = Item Armor "Fancy Suit" 150 0 0 None
-testArmorItem'' = Item Armor "Power Armor mk2" 66 0 6 None
+testWeapons :: [Item]
+testWeapons = [Item Weapon "Sword of Test +1" 100 4 0 None
+              ,Item Weapon "Shard of Glass" 150 2 0 None
+              ,Item Weapon "Staff of Skepticism" 50 10 0 None
+              ]
 
-testMiscItem, testMiscItem', testMiscItem'' :: Item
-testMiscItem   = Item Potion "Homeopathic Potion" 100 1 0 (Healing 0)
-testMiscItem'  = Item Potion "Potion of Alcohol" 100 1 0 (Healing (-1))
-testMiscItem'' = Item Potion "Potion" 100 1 0 None
+testArmors :: [Item]
+testArmors = [Item Armor "Tested Leather Armor" 100 0 1 None
+             ,Item Armor "Fancy Suit" 150 0 0 None
+             ,Item Armor "Power Armor mk2" 66 0 6 None
+             ]
+
+testMisc :: [Item]
+testMisc = [Item Potion "Homeopathic Potion" 100 1 0 (Healing 0)
+           ,Item Potion "Potion of Alcohol" 100 1 0 (Healing (-1))
+           ,Item Potion "Potion" 100 1 0 None
+           ]
 
 testItems :: [Item]
-testItems = [testWeaponItem, testWeaponItem', testWeaponItem''
-            ,testArmorItem, testArmorItem', testArmorItem''
-            ,testMiscItem, testMiscItem', testMiscItem'']
+testItems = testWeapons ++ testArmors ++ testMisc
 
-nullInv :: Inventory
-nullInv = (testWeaponItem, testArmorItem, testMiscItem)
+randInv :: IO Inventory
+randInv = do
+  w <- randomElem testWeapons
+  a <- randomElem testArmors
+  m <- randomElem testMisc
+  return (w, a, m)
 
 -- to save disk space, the neighbours array could be discarded here
 -- and then rebuilt on load
@@ -138,14 +144,15 @@ save = get >>= io . writeFile "savefile" . show
 load :: Game ()
 load = io (readFile "saveFile") >>= io . readIO >>= put
 
-mkPlayer :: Vector2 -> Entity
-mkPlayer p' =
-  Entity { pc       = True
+mkPlayer :: Vector2 -> IO Entity
+mkPlayer p' = do
+  pinv <- randInv
+  return $ Entity { pc       = True
          , name     = "Player"
          , pos      = p'
          , sym      = '@'
          , hp       = (20, 20)
-         , inv      = nullInv
+         , inv      = pinv
          , speed    = 100
          , nextMove = 0
          , seenL    = listArray ((1,1), (80,22)) (repeat False)
@@ -161,17 +168,19 @@ mkEnemiesOnLevel dl nm l' = do
   en <- randomRIO (1 * dl, 3 * dl)
   es <- randFloors l' en
   ep <- randFloor l' 
+  ei <- replicateM en randInv
+  bi <- randInv
   -- add "boss" on the 5th floor
   let b=[Entity False ep 'G' "Dreadlord Gates" (32,32) 
-         nullInv 135 0 nullA nullA | dl==5]
+         bi 135 0 nullA nullA | dl==5]
       -- make some test monsters
       syms   = cycle "LAmbda"
       names  = cycle ["Lamar", "Ant", "Mom", "Bear", "Dog", "Armadillo"]
       speeds = cycle [50, 99, 101, 120, 95, 85]
       hps    = cycle [(5,5), (7,7), (8,8), (13,13), (3,3), (1,1)]
   return $ b ++ 
-    zipWith5 (\p c n s h -> Entity False p c n h nullInv s nm nullA nullA) 
-      es syms names speeds hps
+    zipWith6 (\p c n s h i -> Entity False p c n h i s nm nullA nullA) 
+      es syms names speeds hps ei
 
 -- | Creates a brand-new, fully filled Game.
 mkDungeonLevel :: Game ()
@@ -180,9 +189,9 @@ mkDungeonLevel = do
   p  <- io $ randFloor l -- player
   ep <- io $ randFloor l
   ip <- io $ randFloors l 7
+  p' <- io $ mkPlayer p
   let turn' = 0
       dlvl' = 1
-      p'    = mkPlayer p
       itms  = zip ip (cycle testItems)
   entities' <- io $ mkEnemiesOnLevel dlvl' 0 l
   put GameState
@@ -562,7 +571,9 @@ movePlayer c = do
   l  <- gets level
   en <- gets entities
   let (p,en') = getPC en
+      -- position player wants to move to
       newp    = (keyToDir c) (pos p)
+  -- is there someone there?
   case en' `getEntityAt` newp of
       -- we're moving into an enemy
       Just e -> attackEntity p e
