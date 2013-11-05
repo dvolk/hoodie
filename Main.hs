@@ -5,7 +5,7 @@ module Main where
 import Control.Monad.State
 import Data.Array.IArray
 import Data.Array.IO
-import Data.List (sortBy, find, zipWith6)
+import Data.List (sortBy, find)
 import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Maybe
@@ -22,8 +22,6 @@ type LevelPart  = [(Vector2, Char)] -- update for array
 -- then change dungeon to [dungeon] to allow many levels
 type Level      = Array Vector2 Char
 type Neighbours = Array Vector2 (Set.Set Vector2)
--- player can carry 1 weapon, 1 armor and 1 misc item
---type Inventory  = (Item, Item, Item) 
 
 newtype GameT s m a = GameT (StateT s m a)
     deriving (Functor, Monad, MonadIO, MonadTrans, MonadState s)
@@ -44,10 +42,13 @@ data Side = T | B | L | R -- room sides
 data ItemType = Weapon -- ']'
               | Armor  -- '['
               | Potion -- '!'
+              | Scroll -- '?'
               deriving (Eq, Show, Read)
 
 data ItemEffect = None
                 | Healing Int
+                | Death
+                | Teleport
                 deriving (Eq, Show, Read)
 
 data Item = Item
@@ -114,7 +115,6 @@ emptyL = listArray ((1,1), (80, 22)) (repeat ' ')
 nullA :: Array Vector2 Bool
 nullA = listArray ((1,1), (2,2)) (repeat False)
 
-
 testWeapons :: [Item]
 testWeapons = [Item Weapon "Sword of Test +1" 100 4 0 None
               ,Item Weapon "Shard of Glass" 150 2 0 None
@@ -128,10 +128,26 @@ testArmors = [Item Armor "Tested Leather Armor" 100 0 1 None
              ]
 
 testMisc :: [Item]
-testMisc = [Item Potion "Scroll of Modern Medicine" 100 1 0 (Healing 6)
-           ,Item Potion "Potion of Alcohol" 100 1 0 (Healing (-1))
-           ,Item Potion "Homeopathic Potion" 100 1 0 (Healing 0)
+testMisc = [Item Scroll "Scroll of Modern Medicine" 100 0 0 (Healing 6)
+           ,Item Potion "Potion of Alcohol" 100 0 0 (Healing (-1))
+           ,Item Potion "Homeopathic Potion" 100 0 0 (Healing 0)
+           ,Item Scroll "Scroll of Death" 100 0 0 Death
+           ,Item Scroll "Book of Teleportation" 100 0 0 Teleport
            ]
+
+testEnemies :: [Entity]
+testEnemies = 
+  [Entity False (0,0) 'L' "Lamar" (5,5) undefined 50 0 nullA nullA
+  ,Entity False (0,0) 'A' "Ant" (7,7) undefined 99 0 nullA nullA
+  ,Entity False (0,0) 'm' "Mom" (8,8) undefined 101 0 nullA nullA
+  ,Entity False (0,0) 'b' "Bear" (13,13) undefined 120 0 nullA nullA
+  ,Entity False (0,0) 'd' "Dog" (3,3) undefined 95 0 nullA nullA
+  ,Entity False (0,0) 'a' "Armadillo" (1,1) undefined 85 0 nullA nullA
+  ]
+
+testBoss :: Entity
+testBoss = 
+  Entity False (0,0) 'G' "Dreadlord Gates" (32,32) undefined 135 0 nullA nullA
 
 testItems :: [Item]
 testItems = testWeapons ++ testArmors ++ testMisc
@@ -175,69 +191,67 @@ mkEnemiesOnLevel :: Int -- number of enemies
                  -- when descending the dungeon
                  -> Level 
                  -> IO [Entity]
-mkEnemiesOnLevel dl nm l' = do
-  en <- randomRIO (1 * dl, 3 * dl)
-  es <- randFloors l' en
-  ep <- randFloor l' 
-  ei <- replicateM en randInv
-  bi <- randInv
-  -- add "boss" on the 5th floor
-  let b=[Entity False ep 'G' "Dreadlord Gates" (32,32) 
-         bi 135 0 nullA nullA | dl==5]
-      -- make some test monsters
-      syms   = cycle "LAmbda"
-      names  = cycle ["Lamar", "Ant", "Mom", "Bear", "Dog", "Armadillo"]
-      speeds = cycle [50, 99, 101, 120, 95, 85]
-      hps    = cycle [(5,5), (7,7), (8,8), (13,13), (3,3), (1,1)]
-  return $ b ++ 
-    zipWith6 (\p c n s h i -> Entity False p c n h i s nm nullA nullA) 
-      es syms names speeds hps ei
+mkEnemiesOnLevel dl nm l = do
+  en <- randomRIO (1 * dl, 3 * dl) -- amount of enemies
+  es <- randFloors l en            -- positions
+  ei <- replicateM en randInv      -- inventories
+  em <- replicateM en (randomElem testEnemies) -- random enemies
+  ep <- randFloor l                -- position of boss, maybe
+  bi <- randInv                    -- inventory of boss, maybe
+  return $ 
+    -- add the boss on the fifth level
+    [testBoss { pos = ep, inv = bi, nextMove = nm } | dl == 5] ++ 
+    -- add normal enemies
+    zipWith3 (\e p i -> e { pos = p, inv = i, nextMove = nm }) em es ei
+
+mkItemsOnLevel :: Level -> IO [(Vector2, Item)]
+mkItemsOnLevel l = do
+  i  <- randomRIO (3,9)
+  is <- replicateM i (randomElem testItems)
+  ip <- randFloors l i
+  return (zip ip is)
 
 -- | Creates a brand-new, fully filled Game.
 mkDungeonLevel :: Game ()
 mkDungeonLevel = do
-  l  <- io $ mkRandRooms (80, 22)
-  p  <- io $ randFloor l -- player
-  ep <- io $ randFloor l
-  ip <- io $ randFloors l 7
-  p' <- io $ mkPlayer p
-  let turn' = 0
-      dlvl' = 1
-      itms  = zip ip (cycle testItems)
-  entities' <- io $ mkEnemiesOnLevel dlvl' 0 l
+  l  <- io $ mkRandRooms (80, 22) -- dungeon, or level
+  p  <- io $ randFloor l          -- player position
+  ep <- io $ randFloor l          -- exit position
+  is <- io $ mkItemsOnLevel l
+  p' <- io $ mkPlayer p           -- player position
+  entities' <- io $ mkEnemiesOnLevel 1 0 l
   put GameState
     { entities = p' : entities' 
-    , items    = itms
+    , items    = is
     , level    = l // [(ep, '>')]
     , msgs     = [(0, False, "Welcome to hoodie! (press ? for help)")]
-    , turn     = turn'
+    , turn     = 0
     , pquit    = False
     , narr     = mkNeighbourArray l ".⋅+#SDk"
-    , dlvl     = dlvl'
+    , dlvl     = 1
     }
 
 -- | changes all the things that need the change between floors
 descendLevel :: Game ()
 descendLevel = do
   g <- get
-  let (p,_) = getPC (entities g)
-  l      <- io $ mkRandRooms (80, 22)
-  pp     <- io $ randFloor l -- player
-  ep     <- io $ randFloor l -- exit
-  ip <- io $ randFloors l 7
+  let (p,_) = getPC (entities g) -- get player
+  l  <- io $ mkRandRooms (80, 22)
+  pp <- io $ randFloor l -- new player position
+  ep <- io $ randFloor l -- exit position
+  is <- io $ mkItemsOnLevel l
   let dlvl' = dlvl g + 1
       p'    = p { pos     = pp
                 , seenL   = listArray ((1,1), (80,22)) (repeat False)
                 , seeingL = listArray ((1,1), (80,22)) (repeat False)
                 }
-      itms  = zip ip (cycle testItems)
   entities' <- io $ mkEnemiesOnLevel dlvl' (nextMove p + 1) l
   put $ g
     { entities = p' : entities' 
                  -- level 5 is the last level
     , level    = if dlvl' == 5 then l else l // [(ep, '>')]
     , narr     = mkNeighbourArray l ".⋅+#SDk"
-    , items    = itms
+    , items    = is
     , dlvl     = dlvl'
     }
 
@@ -476,6 +490,7 @@ helpString = ["Hello, hoodie here (press ? again to return)"
              ,"Attack by moving into enemies"
              ,"Wait for a turn by pressing ."
              ,"i to look at your inventory"
+             ,"a to apply your misc item"
              ,", to pick up items below you"
              ,"Descend to the next level with > when you are on stairs"
              ,"Press p to display the message log,"
@@ -511,7 +526,8 @@ itemSym i = case iType i of
   Weapon -> ']'
   Armor  -> '['
   Potion -> '!'
-
+  Scroll -> '?'
+  
 drawEverything :: Game ()
 drawEverything  = do
   (GameState l en itms ms _ _ _ dl) <- get
@@ -534,6 +550,7 @@ drawEverything  = do
     forM_ en' (\(Entity _ i c _ _ _ _ _ _ _) ->
       when (seeing ! i) 
         (drawStringAt i [c]))
+    -- draw all enemies:
 --    forM_ en (\(Entity _ i c _ _ _ _ _ _ _) -> drawStringAt i [c])
     -- draw player
     withReverse $ drawStringAt pp "@"
@@ -579,9 +596,11 @@ movePlayer :: Char -> Game ()
 movePlayer c = do
   l  <- gets level
   en <- gets entities
+  is <- gets items
   let (p,en') = getPC en
       -- position player wants to move to
       newp    = keyToDir c (pos p)
+      
   -- is there someone there?
   case en' `getEntityAt` newp of
       -- we're moving into an enemy
@@ -589,7 +608,10 @@ movePlayer c = do
       -- or not
       Nothing ->
         if l `walkableL` newp
-          then p `moveEntityTo` newp
+          then do
+            let i = newp `lookup` is
+            when (isJust i) $ addMessage $ "You see here the "++iName (fromJust i)
+            p `moveEntityTo` newp
           else addMessage "You bump into an obstacle!"
 
 modifyEntityAt :: [Entity] -> Vector2 -> (Entity -> Entity) -> [Entity]
@@ -702,7 +724,7 @@ gameTurn = do
         'p' -> displayMessageLog
         '?' -> displayHelp
         ',' -> playerPickupItem
-        'a' -> playerApplyItem
+        'a' -> entityApplyItem e
         'i' -> displayPlayerInventory
         's' -> save
         'd' -> load
@@ -718,21 +740,56 @@ modifyEntity e f = do
   en <- gets entities
   put $ g { entities = map (\e' -> if e' == e then f e' else e') en }
 
-itemUseCost :: Entity -> Item -> Int
-itemUseCost e i = 1000 `div` ((speed e + iSpeed i) `div` 2)
 
-playerApplyItem :: Game ()
-playerApplyItem = do
+-- |    The time needed to perform an action is:
+--
+--                        1000
+--       --------------------------------------
+--       (speed of entity + speed of item used)       
+--         ----------------------------------
+--                         2
+--
+-- or equivalently: 2000 / (speed of entity + speed of item used)
+--
+-- for moving around, the item speed used is that of the equipped armor
+itemUseCost :: Entity -> Item -> Int
+itemUseCost e i = 2000 `div` (speed e + iSpeed i)
+
+-- TODO: consume item or item charge on use
+-- | Use your misc item to do something
+entityApplyItem :: Entity -> Game ()
+entityApplyItem e = do
   g <- get
   let (p, _) = getPC (entities g)
-      pm = equMisc (inv p)
+      pm     = equMisc (inv e)
+      verb   = case iType pm of
+                 Potion -> "drink"
+                 Scroll -> "read"
+                 _      -> ""
+      useMsg = 
+        if e == p
+           then "You " ++ verb ++ " the " ++ iName pm ++ "!"
+           -- don't bother using verbs for others :)
+           else name e ++ " uses the " ++ iName pm ++ "!"
   case iEffect pm of
     None      -> return ()
     Healing n -> do
-      addMessage $ "You use the " ++ iName pm ++ "!"
-      modifyEntity p ( modifyEntityHp n 
-                     . addEntityTime (itemUseCost p pm))
-
+      addMessage useMsg
+      modifyEntity e ( modifyEntityHp n 
+                     . addEntityTime (itemUseCost e pm))
+    Death     -> do
+      -- always add useMsg
+      addMessage useMsg
+      -- only add these when the player uses items
+      when (e == p) $ addMessage "You feel stupid!"
+      modifyEntity e ( modifyEntityHp (-999))
+    Teleport  -> do
+      addMessage useMsg
+      newp <- io $ randFloor (level g)
+      modifyEntity e (modifyEntityPos newp)
+      when (e == p) $ addMessage "Woosh!"
+      updateVision
+      
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
 playerPickupItem = do
@@ -757,7 +814,7 @@ playerPickupItem = do
           dropped = case iType i of
            Weapon -> equWeapon (inv p)
            Armor  -> equArmor  (inv p)
-           _      -> equArmor  (inv p)
+           _      -> equMisc   (inv p)
       -- commit new inventory, remove the item from the floor
       -- and add the dropped item to the floor at the player's feet
       put $ g { entities = p { inv = newinv } : en 
@@ -777,14 +834,25 @@ ageMessages = do
 updateVision :: Game ()
 updateVision = get >>= io . updateVision' >>= put
 
+-- | Checks if the Entity current hp <= 0.3 of max
+panicEntityAI :: Entity -> Bool
+panicEntityAI e = 
+  let (cHp, mHp) = hp e
+      hpRatio = (fromIntegral cHp) / (fromIntegral mHp) :: Double
+  in hpRatio <= 0.3
+
 processEnemies :: (Entity, [Entity]) -> Game ()
 processEnemies (e, en) = do
-  let p = (fst . getPC) en  
-  -- if the enemy is next to the player, attack, otherwise
-  -- move closer to the player
-  if pos e `nextTo` pos p
-    then e `attackEntity` p
-    else moveEntityAI en e
+  let p = (fst . getPC) en
+  if panicEntityAI e
+     -- if the entity has low hp then use its misc item
+     then entityApplyItem e
+     else 
+       -- if the enemy is next to the player, attack, otherwise
+       -- move closer to the player
+       if pos e `nextTo` pos p
+         then e `attackEntity` p
+         else moveEntityAI en e
 
 -- | subtract damage from defender, add time spent to the attacker, and
 -- add messages 
@@ -797,7 +865,7 @@ attackEntity atk def = do
       da = equArmor  (inv def)
       -- damage done from attacker to defender is attacker's weapon attack
       -- value minus defender's armor's defend value
-      dmg   = max 0 (iDamage aw - iDefence da)
+      dmg = max 0 (iDamage aw - iDefence da)
   -- add messages
   when (isPC def) $ addMessage $ "The " ++ name atk ++ " hits you!"
   when (isPC atk) $ addMessage $ "You hit the " ++ name def ++ "!"
@@ -882,14 +950,15 @@ moveEntityAI en' e = do
       -- at least one element of this list - id.
       bestfunc = head $ dropWhile (\f -> not (goodmove (f ep))) sorted_funs
       
-  -- enemies have a detection radius of 10
+  -- enemies have a detection radius of 10, if the player is outside
+  -- it then just stand still
   e `moveEntityTo` (if cartDistance ep pp < 10 then bestfunc ep else ep)
 
 quitCond :: Game Bool
 quitCond = liftM pquit get
 
-runGame :: Game Bool  -- ^ end condition
-        -> Game ()    -- ^ update function
+runGame :: Game Bool    -- ^ end condition
+        -> Game ()      -- ^ update function
         -> IO GameState -- ^ end state
 runGame predf logicf = do
   let loop' = do
@@ -910,6 +979,7 @@ main = do
   g <- runGame quitCond gameTurn
   mapM_ print (reverse (msgs g))
 
+-- FOV init
 ioInit :: IO Settings
 ioInit = do
   settings <- newSettings
@@ -917,6 +987,7 @@ ioInit = do
   setOpaqueApply settings True
   return settings
 
+-- ncurses stuff
 draw :: Update () -> Curses ()
 draw ioact = do
   w <- defaultWindow
