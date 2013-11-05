@@ -23,7 +23,7 @@ type LevelPart  = [(Vector2, Char)] -- update for array
 type Level      = Array Vector2 Char
 type Neighbours = Array Vector2 (Set.Set Vector2)
 -- player can carry 1 weapon, 1 armor and 1 misc item
-type Inventory  = (Item, Item, Item) 
+--type Inventory  = (Item, Item, Item) 
 
 newtype GameT s m a = GameT (StateT s m a)
     deriving (Functor, Monad, MonadIO, MonadTrans, MonadState s)
@@ -57,6 +57,13 @@ data Item = Item
     , iDamage  :: Int
     , iDefence :: Int
     , iEffect  :: ItemEffect
+    } deriving (Eq, Show, Read)
+
+data Inventory = Inventory
+    { equWeapon :: Item
+    , equArmor  :: Item
+    , equMisc   :: Item
+    , storedItems :: [Item]
     } deriving (Eq, Show, Read)
 
 data Entity = Entity
@@ -121,9 +128,9 @@ testArmors = [Item Armor "Tested Leather Armor" 100 0 1 None
              ]
 
 testMisc :: [Item]
-testMisc = [Item Potion "Homeopathic Potion" 100 1 0 (Healing 0)
+testMisc = [Item Potion "Scroll of Modern Medicine" 100 1 0 (Healing 6)
            ,Item Potion "Potion of Alcohol" 100 1 0 (Healing (-1))
-           ,Item Potion "Potion" 100 1 0 None
+           ,Item Potion "Homeopathic Potion" 100 1 0 (Healing 0)
            ]
 
 testItems :: [Item]
@@ -134,7 +141,10 @@ randInv = do
   w <- randomElem testWeapons
   a <- randomElem testArmors
   m <- randomElem testMisc
-  return (w, a, m)
+  return Inventory { equWeapon = w
+                   , equArmor  = a
+                   , equMisc   = m
+                   , storedItems = [] }
 
 -- to save disk space, the neighbours array could be discarded here
 -- and then rebuilt on load
@@ -147,7 +157,8 @@ load = io (readFile "saveFile") >>= io . readIO >>= put
 mkPlayer :: Vector2 -> IO Entity
 mkPlayer p' = do
   pinv <- randInv
-  return $ Entity { pc       = True
+  return Entity 
+         { pc       = True
          , name     = "Player"
          , pos      = p'
          , sym      = '@'
@@ -483,10 +494,11 @@ displayHelp = do
 
 displayPlayerInventory :: Game ()
 displayPlayerInventory = do
-  (w,a,m) <- (inv . fst . getPC) `fmap` gets entities
-  addMessage $ "Inventory: W: " ++ iName w ++
-               " A: " ++ iName a ++
-               " M: " ++ iName m 
+  p <- (fst . getPC) `fmap` gets entities
+  addMessage $ "Inventory: W: " 
+                      ++ iName (equWeapon (inv p)) ++
+               " A: " ++ iName (equArmor (inv p)) ++
+               " M: " ++ iName (equMisc (inv p)) 
 
 withReverse :: Update () -> Update ()
 withReverse upact = do
@@ -547,9 +559,6 @@ aboveright (x, y) = (x + 1, y - 1)
 belowleft  (x, y) = (x - 1, y + 1)
 belowright (x, y) = (x + 1, y + 1)
 
-getEntityArmor :: Entity -> Item
-getEntityArmor e = let (_, a, _) = inv e in a
-
 -- | maps directional keys to movement functions
 keyToDir :: Char -> Vector2 -> Vector2
 keyToDir c = 
@@ -572,7 +581,7 @@ movePlayer c = do
   en <- gets entities
   let (p,en') = getPC en
       -- position player wants to move to
-      newp    = (keyToDir c) (pos p)
+      newp    = keyToDir c (pos p)
   -- is there someone there?
   case en' `getEntityAt` newp of
       -- we're moving into an enemy
@@ -589,7 +598,8 @@ modifyEntityAt es p f =
 
 modifyEntityHp :: Int -> Entity -> Entity
 modifyEntityHp n e@(Entity _ _ _ _ (hp',maxhp') _ _ _ _ _) = 
-  e { hp = (hp'+n, maxhp') }
+  let newhp = min maxhp' (hp' + n)
+  in e { hp = (newhp, maxhp') }
 
 removeEntityAt :: [Entity] -> Vector2 -> [Entity]
 removeEntityAt es p = filter (\e -> pos e /= p) es
@@ -647,7 +657,7 @@ updateVision' game'@(GameState l en _ _ _ _ _ _) = do
   return game
 
 getGoodCh :: Game Char
-getGoodCh = curses $ waitForChrs "?hjklyubnqsdpri.,>" 
+getGoodCh = curses $ waitForChrs "?hjklyubnqsdpria.,>" 
 
 setQuit :: Game ()
 setQuit = do 
@@ -692,6 +702,7 @@ gameTurn = do
         'p' -> displayMessageLog
         '?' -> displayHelp
         ',' -> playerPickupItem
+        'a' -> playerApplyItem
         'i' -> displayPlayerInventory
         's' -> save
         'd' -> load
@@ -701,16 +712,37 @@ gameTurn = do
     else processEnemies en
   isPlayerDead
   
+modifyEntity :: Entity -> (Entity -> Entity) -> Game ()
+modifyEntity e f = do
+  g  <- get
+  en <- gets entities
+  put $ g { entities = map (\e' -> if e' == e then f e' else e') en }
+
+itemUseCost :: Entity -> Item -> Int
+itemUseCost e i = 1000 `div` ((speed e + iSpeed i) `div` 2)
+
+playerApplyItem :: Game ()
+playerApplyItem = do
+  g <- get
+  let (p, _) = getPC (entities g)
+      pm = equMisc (inv p)
+  case iEffect pm of
+    None      -> return ()
+    Healing n -> do
+      addMessage $ "You use the " ++ iName pm ++ "!"
+      modifyEntity p ( modifyEntityHp n 
+                     . addEntityTime (itemUseCost p pm))
+
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
 playerPickupItem = do
   g <- get
       -- items on the floor
-  let is           = items g
+  let is      = items g
       -- player and friends
-      (p, en)      = getPC (entities g)
+      (p, en) = getPC (entities g)
       -- current inventory
-      (pw, pa, pm) = inv p
+      cinv    = inv p
   -- is there an item below us?
   case pos p `lookup` is of
     Nothing -> 
@@ -718,19 +750,22 @@ playerPickupItem = do
     Just i  -> do 
           -- make a new inventory based on the type of the item
       let newinv = case iType i of
-           Weapon -> (i, pa, pm)
-           Armor  -> (pw, i, pm)
-           _      -> (pw, pa, i)
+           Weapon -> cinv { equWeapon = i }
+           Armor  -> cinv { equArmor  = i }
+           _      -> cinv { equMisc   = i }
           -- item we're dropping from the player's inventory
           dropped = case iType i of
-           Weapon -> pw
-           Armor  -> pa
-           _      -> pm
+           Weapon -> equWeapon (inv p)
+           Armor  -> equArmor  (inv p)
+           _      -> equArmor  (inv p)
       -- commit new inventory, remove the item from the floor
       -- and add the dropped item to the floor at the player's feet
       put $ g { entities = p { inv = newinv } : en 
               , items    = (pos p, dropped) : filter (/= (pos p, i)) is 
               }
+      -- picking stuff up takes time
+      modifyEntity p (addEntityTime (itemUseCost p i))
+      -- add message
       addMessage $ "You pick up the " ++ iName i ++ "!"
 
 -- | After one turn, set messages to viewed so they don't display any more
@@ -757,30 +792,21 @@ attackEntity :: Entity -- attacker
              -> Entity -- defender
              -> Game ()
 attackEntity atk def = do
-  en <- gets entities
-  let -- attacker and defender stats
-      (Entity _ atp _ an _ ainv _ _ _ _) = atk
-      (Entity _ dep _ dn _ dinv _ _ _ _) = def
-      -- inventories of the attacker and defender
-      (aw, _, _) = ainv
-      (_, da, _) = dinv
+  let -- inventories of the attacker and defender
+      aw = equWeapon (inv atk)
+      da = equArmor  (inv def)
       -- damage done from attacker to defender is attacker's weapon attack
       -- value minus defender's armor's defend value
-      dmg   = 
-        let dmg' = iDamage aw - iDefence da
-        in if dmg' <= 0 then 0 else dmg'
-      -- attack cost is the average of the attacker's speed and their weapon's
-      -- speed
-      aCost = 1000 `div` ((iSpeed aw + speed atk) `div` 2)
+      dmg   = max 0 (iDamage aw - iDefence da)
   -- add messages
-  when (isPC def) $ addMessage $ "The " ++ an ++ " hits you!"
-  when (isPC atk) $ addMessage $ "You hit the " ++ dn ++ "!"
+  when (isPC def) $ addMessage $ "The " ++ name atk ++ " hits you!"
+  when (isPC atk) $ addMessage $ "You hit the " ++ name def ++ "!"
   unless (isPC def || isPC atk) $
-    addMessage $ "The " ++ an ++ "hits the " ++ dn ++ "!"
-  let en'  = modifyEntityAt en  dep (modifyEntityHp (-dmg))
-      en'' = modifyEntityAt en' atp (addEntityTime aCost)
-  g' <- get
-  put $ g' { entities = en'' }
+    addMessage $ "The " ++ name atk ++ "hits the " ++ name def ++ "!"
+  -- damage the defender
+  modifyEntity def (modifyEntityHp (-dmg))
+  -- add attack cost to the attacker
+  modifyEntity atk (addEntityTime (itemUseCost atk aw))
 
 -- | remove entities that have <= 0 current hitpoints and add messages about
 -- their deaths
@@ -817,20 +843,17 @@ distances a b =
 nextTo :: Vector2 -> Vector2 -> Bool
 nextTo a b = any (\f -> a == f b) directions
 
-moveEntityTo :: Entity -> Vector2 -> Game ()
-moveEntityTo e newp = do
-  g  <- get 
-      -- the rest of the entities
-  let rest     = filter (/= e) (entities g)
-      -- move cost is the average of the speed of the entity and the 
-      -- speed of the armor
-      moveCost = 1000 `div` ((speed e + iSpeed (getEntityArmor e)) `div` 2)
-      newE     = e { pos = newp
-                   , nextMove = nextMove e + moveCost }
-  put $ g { entities = newE : rest }
+modifyEntityPos :: Vector2 -> Entity -> Entity
+modifyEntityPos new e = e { pos = new }
 
 addEntityTime :: Int -> Entity -> Entity
 addEntityTime n e = e { nextMove = nextMove e + n }
+
+moveEntityTo :: Entity -> Vector2 -> Game ()
+moveEntityTo e newp =
+  modifyEntity e ( modifyEntityPos newp
+                 . addEntityTime (itemUseCost e (equArmor (inv e)))
+                 )
 
 -- | make a list of functions sorted by the distance that they would bring
 -- the enemy to if it moved in that direction, then select the first good one
@@ -858,11 +881,9 @@ moveEntityAI en' e = do
       -- by ascending distance, it's the optimal move. There is always
       -- at least one element of this list - id.
       bestfunc = head $ dropWhile (\f -> not (goodmove (f ep))) sorted_funs
-            -- enemies have a detection radius of 10
-      newp = if cartDistance ep pp < 10
-                 then e `moveEntityTo` bestfunc ep
-                 else e `moveEntityTo` ep
-  newp
+      
+  -- enemies have a detection radius of 10
+  e `moveEntityTo` (if cartDistance ep pp < 10 then bestfunc ep else ep)
 
 quitCond :: Game Bool
 quitCond = liftM pquit get
