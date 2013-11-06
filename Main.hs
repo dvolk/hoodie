@@ -43,13 +43,23 @@ data ItemType = Weapon -- ']'
               | Armor  -- '['
               | Potion -- '!'
               | Scroll -- '?'
+              | Corpse -- '%'
               deriving (Eq, Show, Read)
 
 data ItemEffect = None
                 | Healing Int
                 | Death
                 | Teleport
+                | Yuck
                 deriving (Eq, Show, Read)
+
+-- TODO: use this
+data EntityStats = EntityStats
+    { strength     :: Int
+    , agility      :: Int
+    , intelligence :: Int
+    , beauty       :: Int
+    } deriving (Eq, Show, Read)
 
 data Item = Item
     { iType    :: ItemType
@@ -57,8 +67,10 @@ data Item = Item
     , iSpeed   :: Int
     , iDamage  :: Int
     , iDefence :: Int
+    , iWeight  :: Int -- mass in grams
     , iEffect  :: ItemEffect
     } deriving (Eq, Show, Read)
+
 
 data Inventory = Inventory
     { equWeapon :: Item
@@ -74,6 +86,7 @@ data Entity = Entity
     , name     :: String
     , hp       :: (Int, Int)
     , inv      :: Inventory
+    , weight   :: Int -- mass in grams
     , speed    :: Int
     , nextMove :: Int
     , seenL    :: Array Vector2 Bool -- ^what the player has seen of the level
@@ -116,38 +129,40 @@ nullA :: Array Vector2 Bool
 nullA = listArray ((1,1), (2,2)) (repeat False)
 
 testWeapons :: [Item]
-testWeapons = [Item Weapon "Sword of Test +1" 100 4 0 None
-              ,Item Weapon "Shard of Glass" 150 2 0 None
-              ,Item Weapon "Staff of Skepticism" 50 10 0 None
+testWeapons = [Item Weapon "Sword of Test +1" 100 4 0 1500 None
+              ,Item Weapon "Shard of Glass" 150 2 0 300 None
+              ,Item Weapon "Staff of Skepticism" 50 10 0 4000 None
               ]
 
 testArmors :: [Item]
-testArmors = [Item Armor "Tested Leather Armor" 100 0 1 None
-             ,Item Armor "Fancy Suit" 150 0 0 None
-             ,Item Armor "Power Armor mk2" 66 0 6 None
+testArmors = [Item Armor "Tested Leather Armor" 100 0 1 5000 None
+             ,Item Armor "Fancy Suit" 150 0 0 2000 None
+             ,Item Armor "Power Armor mk2" 66 0 6 30000 None
              ]
 
 testMisc :: [Item]
-testMisc = [Item Scroll "Scroll of Modern Medicine" 100 0 0 (Healing 6)
-           ,Item Potion "Potion of Alcohol" 100 0 0 (Healing (-1))
-           ,Item Potion "Homeopathic Potion" 100 0 0 (Healing 0)
-           ,Item Scroll "Scroll of Death" 100 0 0 Death
-           ,Item Scroll "Book of Teleportation" 100 0 0 Teleport
+testMisc = [Item Scroll "Scroll of Modern Medicine" 100 0 0 100 (Healing 6)
+           ,Item Potion "Potion of Alcohol" 100 0 0 700 (Healing (-1))
+           ,Item Potion "Homeopathic Potion" 100 0 0 500 (Healing 0)
+           ,Item Scroll "Scroll of Death" 100 0 0 100 Death
+           ,Item Scroll "Book of Teleportation" 100 0 0 1000 Teleport
+           ,Item Corpse "Rodent Corpse" 100 0 0 1000 Yuck
            ]
 
 testEnemies :: [Entity]
 testEnemies = 
-  [Entity False (0,0) 'L' "Lamar" (5,5) undefined 50 0 nullA nullA
-  ,Entity False (0,0) 'A' "Ant" (7,7) undefined 99 0 nullA nullA
-  ,Entity False (0,0) 'm' "Mom" (8,8) undefined 101 0 nullA nullA
-  ,Entity False (0,0) 'b' "Bear" (13,13) undefined 120 0 nullA nullA
-  ,Entity False (0,0) 'd' "Dog" (3,3) undefined 95 0 nullA nullA
-  ,Entity False (0,0) 'a' "Armadillo" (1,1) undefined 85 0 nullA nullA
+  [Entity False (0,0) 'L' "Lamar" (5,5) undefined 30000 50 0 nullA nullA
+  ,Entity False (0,0) 'A' "Giant Ant" (7,7) undefined 10000 99 0 nullA nullA
+  ,Entity False (0,0) 'm' "Mom" (8,8) undefined 60000 101 0 nullA nullA
+  ,Entity False (0,0) 'b' "Bear" (13,13) undefined 120000 120 0 nullA nullA
+  ,Entity False (0,0) 'd' "Dog" (3,3) undefined 8000 95 0 nullA nullA
+  ,Entity False (0,0) 'a' "Armadillo" (1,1) undefined 1000 85 0 nullA nullA
   ]
 
 testBoss :: Entity
 testBoss = 
-  Entity False (0,0) 'G' "Dreadlord Gates" (32,32) undefined 135 0 nullA nullA
+  Entity False (0,0) 'G' "Dreadlord Gates" (32,32) 
+   undefined 75000 135 0 nullA nullA
 
 testItems :: [Item]
 testItems = testWeapons ++ testArmors ++ testMisc
@@ -180,6 +195,7 @@ mkPlayer p' = do
          , sym      = '@'
          , hp       = (20, 20)
          , inv      = pinv
+         , weight   = 75000
          , speed    = 100
          , nextMove = 0
          , seenL    = listArray ((1,1), (80,22)) (repeat False)
@@ -527,42 +543,40 @@ itemSym i = case iType i of
   Armor  -> '['
   Potion -> '!'
   Scroll -> '?'
-  
+  Corpse -> '%'
+
 drawEverything :: Game ()
 drawEverything  = do
-  (GameState l en itms ms _ _ _ dl) <- get
-  let (Entity _ pp _ _ (chp,mhp) _ sp nextmove seen seeing, en') = getPC en
+  g  <- get
+  l  <- gets level
+  let (p, en') = getPC (entities g)
+      seen     = seenL p
+      seeing   = seeingL p
+
   curses $ draw $ do
     clear (bounds l)
     -- draw level
-    forM_ (indices l) (\i -> when (seen ! i) (drawStringAt i [l ! i]))
-    -- draw the currently visible part of the level reversed
-    forM_ (indices l) (\i -> 
-      when (seeing ! i)
-        (withReverse (drawStringAt i [l ! i])))
-    -- draw whole level, for debugging:
---    forM_ (indices l) $ \i -> drawStringAt i [l ! i]
+    forM_ (indices l) $ \i -> do 
+      when (seen ! i) (drawStringAt i [l ! i])
+      when (seeing ! i) (withReverse (drawStringAt i [l ! i]))
     -- draw items
-    forM_ itms $ \(ip,i) -> 
-      when (seeing ! ip) $
-        drawStringAt ip [itemSym i]
+    forM_ (items g) $ \(ip,i) -> 
+      when (seeing ! ip) (drawStringAt ip [itemSym i])
     -- draw enemies
-    forM_ en' (\(Entity _ i c _ _ _ _ _ _ _) ->
-      when (seeing ! i) 
-        (drawStringAt i [c]))
-    -- draw all enemies:
---    forM_ en (\(Entity _ i c _ _ _ _ _ _ _) -> drawStringAt i [c])
+    forM_ en' $ \e ->
+      when (seeing ! (pos e)) (drawStringAt (pos e) [sym e])
     -- draw player
-    withReverse $ drawStringAt pp "@"
+    withReverse $ drawStringAt (pos p) "@"
     -- concat unseen messages and draw them
     let dms = concat $ reverse $ map (\(_,_,m) -> m++" ") $ 
-                takeWhile (\(_,b,_) -> not b) ms
+                takeWhile (\(_,b,_) -> not b) (msgs g)
     unless (null dms) $
       withReverse $ drawStringAt (1,1) dms
     -- draw a statusbar, displaying time, speed, dungeon level, and hp
     withReverse $ drawStringAt (1, 24) $
-      "Time: " ++ show nextmove ++ " Speed: " ++ show sp ++ " DL: " ++ show dl 
-      ++ " HP: " ++ show chp ++ "/" ++ show mhp
+      "Time: " ++ show (nextMove p) ++ " Speed: " ++ show (speed p) 
+      ++ " DL: " ++ show (dlvl g) ++ " HP: " ++ show (fst (hp p)) 
+      ++ "/" ++ show (fst (hp p))
 
 above, below, right, left :: Vector2 -> Vector2
 above (x, y) = (x, y - 1)
@@ -619,7 +633,7 @@ modifyEntityAt es p f =
   map (\e -> if e == fromJust (es `getEntityAt` p) then f e else e) es
 
 modifyEntityHp :: Int -> Entity -> Entity
-modifyEntityHp n e@(Entity _ _ _ _ (hp',maxhp') _ _ _ _ _) = 
+modifyEntityHp n e@(Entity _ _ _ _ (hp',maxhp') _ _ _ _ _ _) = 
   let newhp = min maxhp' (hp' + n)
   in e { hp = (newhp, maxhp') }
 
@@ -660,7 +674,7 @@ updateSeen old_seen new_seeing = do
 -- | update the "seen" and "seeing" arrays
 updateVision' :: GameState -> IO GameState
 updateVision' game'@(GameState l en _ _ _ _ _ _) = do
-  let (pl@(Entity _ p _ _ _ _ _ _ seen _), en') = getPC en
+  let (pl@(Entity _ p _ _ _ _ _ _ _ seen _), en') = getPC en
   (seeing',seen') <- do
     s <- ioInit
     newSeeing <- newArray (bounds l) False :: IO (IOUArray Vector2 Bool)
@@ -765,14 +779,15 @@ entityApplyItem e = do
       verb   = case iType pm of
                  Potion -> "drink"
                  Scroll -> "read"
-                 _      -> ""
+                 _      -> "use"
       useMsg = 
         if e == p
            then "You " ++ verb ++ " the " ++ iName pm ++ "!"
            -- don't bother using verbs for others :)
            else name e ++ " uses the " ++ iName pm ++ "!"
   case iEffect pm of
-    None      -> return ()
+    None      -> 
+      return ()
     Healing n -> do
       addMessage useMsg
       modifyEntity e ( modifyEntityHp n 
@@ -789,6 +804,8 @@ entityApplyItem e = do
       modifyEntity e (modifyEntityPos newp)
       when (e == p) $ addMessage "Woosh!"
       updateVision
+    Yuck      ->
+      addMessage $ "You squeeze the " ++ iName pm
       
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
@@ -838,7 +855,7 @@ updateVision = get >>= io . updateVision' >>= put
 panicEntityAI :: Entity -> Bool
 panicEntityAI e = 
   let (cHp, mHp) = hp e
-      hpRatio = (fromIntegral cHp) / (fromIntegral mHp) :: Double
+      hpRatio = fromIntegral cHp / fromIntegral mHp :: Double
   in hpRatio <= 0.3
 
 processEnemies :: (Entity, [Entity]) -> Game ()
@@ -886,8 +903,21 @@ pruneNegativeHpEnemies = do
       dms  = map (\e -> name e ++ " dies!") died
   unless (null died) $
     do mapM_ addMessage dms
+       let corpses = map entityToCorpse died
        g' <- get
-       put $ g' { entities = new }
+       put $ g' { entities = new, items = corpses ++ items g' }
+
+entityToCorpse :: Entity -> (Vector2, Item)
+entityToCorpse e =
+  (pos e,
+  Item { iType    = Corpse
+       , iName    = name e ++ " corpse"
+       , iSpeed   = 100
+       , iDamage  = 0
+       , iDefence = 0
+       , iWeight  = weight e
+       , iEffect  = Yuck
+       })
 
 -- | cartesian distance function
 cartDistance :: Vector2 -> Vector2 -> Double
