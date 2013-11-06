@@ -2,7 +2,7 @@
 
 A small, toy roguelike in Haskell
 
-[Obligatory screenshot](http://i.imgur.com/b1dzGeZ.png)
+[Obligatory screenshot](http://i.imgur.com/k4QASat.png)
 
 ## Instructions
 ### Downloading
