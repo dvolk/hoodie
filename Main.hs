@@ -71,7 +71,6 @@ data Item = Item
     , iEffect  :: ItemEffect
     } deriving (Eq, Show, Read)
 
-
 data Inventory = Inventory
     { equWeapon :: Item
     , equArmor  :: Item
@@ -186,12 +185,12 @@ load :: Game ()
 load = io (readFile "saveFile") >>= io . readIO >>= put
 
 mkPlayer :: Vector2 -> IO Entity
-mkPlayer p' = do
+mkPlayer pos' = do
   pinv <- randInv
   return Entity 
          { pc       = True
          , name     = "Player"
-         , pos      = p'
+         , pos      = pos'
          , sym      = '@'
          , hp       = (20, 20)
          , inv      = pinv
@@ -291,7 +290,7 @@ randFloors l n =
   flip execStateT [] $
     replicateM_ n $ do
       ps' <- get
-      xy <- iterateUntil (`notElem` ps') (liftIO $ randFloor l)
+      xy  <- iterateUntil (`notElem` ps') (liftIO $ randFloor l)
       modify (xy:)
 
 -- | check if two rooms overlap
@@ -564,7 +563,7 @@ drawEverything  = do
       when (seeing ! ip) (drawStringAt ip [itemSym i])
     -- draw enemies
     forM_ en' $ \e ->
-      when (seeing ! (pos e)) (drawStringAt (pos e) [sym e])
+      when (seeing ! pos e) (drawStringAt (pos e) [sym e])
     -- draw player
     withReverse $ drawStringAt (pos p) "@"
     -- concat unseen messages and draw them
@@ -576,7 +575,7 @@ drawEverything  = do
     withReverse $ drawStringAt (1, 24) $
       "Time: " ++ show (nextMove p) ++ " Speed: " ++ show (speed p) 
       ++ " DL: " ++ show (dlvl g) ++ " HP: " ++ show (fst (hp p)) 
-      ++ "/" ++ show (fst (hp p))
+      ++ "/" ++ show (snd (hp p))
 
 above, below, right, left :: Vector2 -> Vector2
 above (x, y) = (x, y - 1)
@@ -633,8 +632,9 @@ modifyEntityAt es p f =
   map (\e -> if e == fromJust (es `getEntityAt` p) then f e else e) es
 
 modifyEntityHp :: Int -> Entity -> Entity
-modifyEntityHp n e@(Entity _ _ _ _ (hp',maxhp') _ _ _ _ _ _) = 
-  let newhp = min maxhp' (hp' + n)
+modifyEntityHp n e = 
+  let (hp', maxhp') = hp e
+      newhp = min maxhp' (hp' + n)
   in e { hp = (newhp, maxhp') }
 
 removeEntityAt :: [Entity] -> Vector2 -> [Entity]
@@ -673,8 +673,12 @@ updateSeen old_seen new_seeing = do
 
 -- | update the "seen" and "seeing" arrays
 updateVision' :: GameState -> IO GameState
-updateVision' game'@(GameState l en _ _ _ _ _ _) = do
-  let (pl@(Entity _ p _ _ _ _ _ _ _ seen _), en') = getPC en
+updateVision' g = do
+  let l       = level g
+      (p,en') = getPC (entities g)
+      pp      = pos p
+      seen    = seenL p
+  
   (seeing',seen') <- do
     s <- ioInit
     newSeeing <- newArray (bounds l) False :: IO (IOUArray Vector2 Bool)
@@ -682,15 +686,16 @@ updateVision' game'@(GameState l en _ _ _ _ _ _) = do
     let lightPoint x y = writeArray newSeeing (x, y) True
         isOpaque x y   = return (l ! (x, y) `elem` " ═║╔╝╚╗")
 
-    circle s p 5 lightPoint isOpaque
+    -- use FOV's circle to write into the newSeeing array
+    circle s pp 5 lightPoint isOpaque
     newSeeing' <- freeze newSeeing :: IO (Array Vector2 Bool)
     newSeen' <- updateSeen seen newSeeing'
     return (newSeeing', newSeen')
 
-  let np   = pl { seenL = seen', seeingL = seeing' }
-      game = game' { entities = np:en' }
+  let np = p { seenL = seen', seeingL = seeing' }
+      g' = g { entities = np:en' }
 
-  return game
+  return g'
 
 getGoodCh :: Game Char
 getGoodCh = curses $ waitForChrs "?hjklyubnqsdpria.,>" 
@@ -724,7 +729,7 @@ setTurn = do
 -- is added to its nextMove. "turn" is used for the lack of a better word.
 gameTurn :: Game ()
 gameTurn = do
-  pruneNegativeHpEnemies
+  processNegativeHpEntities
   g <- get
   let en@(e, _) = entityPQ (entities g)
   if isPC e 
@@ -754,7 +759,6 @@ modifyEntity e f = do
   en <- gets entities
   put $ g { entities = map (\e' -> if e' == e then f e' else e') en }
 
-
 -- |    The time needed to perform an action is:
 --
 --                        1000
@@ -779,6 +783,7 @@ entityApplyItem e = do
       verb   = case iType pm of
                  Potion -> "drink"
                  Scroll -> "read"
+                 Corpse -> "squeeze"
                  _      -> "use"
       useMsg = 
         if e == p
@@ -802,10 +807,11 @@ entityApplyItem e = do
       addMessage useMsg
       newp <- io $ randFloor (level g)
       modifyEntity e (modifyEntityPos newp)
-      when (e == p) $ addMessage "Woosh!"
+      addMessage "Woosh!"
       updateVision
-    Yuck      ->
-      addMessage $ "You squeeze the " ++ iName pm
+    Yuck      -> do
+      addMessage useMsg
+      when (e == p) $ addMessage "Yuck!"
       
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
@@ -895,21 +901,25 @@ attackEntity atk def = do
 
 -- | remove entities that have <= 0 current hitpoints and add messages about
 -- their deaths
-pruneNegativeHpEnemies :: Game ()
-pruneNegativeHpEnemies = do
+processNegativeHpEntities :: Game ()
+processNegativeHpEntities = do
   g <- get
   let died = filter (\e -> fst (hp e) <= 0) (entities g)
-      new  = filter (`notElem` died) (entities g)
-      dms  = map (\e -> name e ++ " dies!") died
   unless (null died) $
-    do mapM_ addMessage dms
-       let corpses = map entityToCorpse died
+           -- death messages
+    do let dms  = map (\e -> name e ++ " dies!") died
+           -- entities that are still alive
+           new  = filter (`notElem` died) (entities g)
+           -- create corpses to drop at the positions where
+           -- the entities died
+           corpses = map (\e -> (pos e, entityToCorpse e)) died
+       -- add messages
+       mapM_ addMessage dms
        g' <- get
        put $ g' { entities = new, items = corpses ++ items g' }
 
-entityToCorpse :: Entity -> (Vector2, Item)
+entityToCorpse :: Entity -> Item
 entityToCorpse e =
-  (pos e,
   Item { iType    = Corpse
        , iName    = name e ++ " corpse"
        , iSpeed   = 100
@@ -917,7 +927,7 @@ entityToCorpse e =
        , iDefence = 0
        , iWeight  = weight e
        , iEffect  = Yuck
-       })
+       }
 
 -- | cartesian distance function
 cartDistance :: Vector2 -> Vector2 -> Double
