@@ -51,7 +51,7 @@ data ItemEffect = None
                 | Death
                 | Teleport
                 | Yuck
-                | Transmute -- ? Maybe
+                | Transmute
                 deriving (Eq, Show, Read)
 
 -- TODO: use this
@@ -147,6 +147,7 @@ testMisc = [Item Scroll "Scroll of Modern Medicine" 100 0 0 100 (Healing 6)
            ,Item Scroll "Scroll of Death" 100 0 0 100 Death
            ,Item Scroll "Book of Teleportation" 100 0 0 1000 Teleport
            ,Item Corpse "Rodent Corpse" 100 0 0 1000 Yuck
+           ,Item Scroll "Book of Transmutation" 100 0 0 1000 Transmute
            ]
 
 testEnemies :: [Entity]
@@ -794,32 +795,53 @@ entityApplyItem e = do
            then "You " ++ verb ++ " the " ++ iName pm ++ "!"
            -- don't bother using verbs for others :)
            else name e ++ " uses the " ++ iName pm ++ "!"
+                
+  modifyEntity e (addEntityTime (itemUseCost e pm))
+  
   case iEffect pm of
-    None      -> 
-      modifyEntity e (addEntityTime (itemUseCost e pm))
+    -- item does nothing
+    None      -> do
+      addMessage useMsg
+      when isPlayer $ addMessage "You reflect on your life..."
+    -- item heals (or hurts)
     Healing n -> do
       addMessage useMsg
-      modifyEntity e (modifyEntityHp n 
-                     .addEntityTime (itemUseCost e pm))
+      modifyEntity e (modifyEntityHp n)
+    -- item kills entity (doh)
     Death     -> do
       -- always add useMsg
       addMessage useMsg
       -- only add these when the player uses items
       when isPlayer $ addMessage "You feel stupid!"
-      modifyEntity e (modifyEntityHp (-999)
-                     .addEntityTime (itemUseCost e pm))
+      modifyEntity e (modifyEntityHp (-999))
+    -- item randomly teleports entity
     Teleport  -> do
       addMessage useMsg
       newp <- io $ randFloor (level g)
-      modifyEntity e (modifyEntityPos newp
-                     .addEntityTime (itemUseCost e pm))
+      modifyEntity e (modifyEntityPos newp)
       addMessage "Woosh!"
       updateVision
+    -- item does nothing
     Yuck      -> do
       addMessage useMsg
-      modifyEntity e (addEntityTime (itemUseCost e pm))
       when isPlayer $ addMessage "Yuck!"
-      
+    -- item turns entity's weapon into another one
+    Transmute -> do
+      addMessage useMsg
+      let curWeapon = equWeapon $ inv e
+      -- find a new weapon that's different from the current one
+      newWeapon <- io $ randomElem testWeapons `satisfying` (/= curWeapon)
+      -- equip it
+      modifyEntity e ( modifyInventory (\i -> i { equWeapon = newWeapon }))
+      when isPlayer $ addMessage $ "Your " ++ iName curWeapon 
+                    ++ " turns into " ++ iName newWeapon ++ "!"
+
+satisfying :: Monad m => m a -> (a -> Bool) -> m a
+satisfying = flip iterateUntil
+
+modifyInventory :: (Inventory -> Inventory) -> Entity -> Entity
+modifyInventory f e = e { inv = f (inv e) }
+                       
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
 playerPickupItem = do
