@@ -51,6 +51,7 @@ data ItemEffect = None
                 | Death
                 | Teleport
                 | Yuck
+                | Transmute -- ? Maybe
                 deriving (Eq, Show, Read)
 
 -- TODO: use this
@@ -288,6 +289,8 @@ randFloor l = iterateUntil (isFloor l) (randomV2 (bounds l))
 randFloors :: Level -> Int -> IO [Vector2]
 randFloors l n =
   flip execStateT [] $
+  -- I need to check if there are even enough floor tiles
+  -- for this to terminate
     replicateM_ n $ do
       ps' <- get
       xy  <- iterateUntil (`notElem` ps') (liftIO $ randFloor l)
@@ -785,33 +788,37 @@ entityApplyItem e = do
                  Scroll -> "read"
                  Corpse -> "squeeze"
                  _      -> "use"
+      isPlayer = e == p
       useMsg = 
-        if e == p
+        if isPlayer
            then "You " ++ verb ++ " the " ++ iName pm ++ "!"
            -- don't bother using verbs for others :)
            else name e ++ " uses the " ++ iName pm ++ "!"
   case iEffect pm of
     None      -> 
-      return ()
+      modifyEntity e (addEntityTime (itemUseCost e pm))
     Healing n -> do
       addMessage useMsg
-      modifyEntity e ( modifyEntityHp n 
-                     . addEntityTime (itemUseCost e pm))
+      modifyEntity e (modifyEntityHp n 
+                     .addEntityTime (itemUseCost e pm))
     Death     -> do
       -- always add useMsg
       addMessage useMsg
       -- only add these when the player uses items
-      when (e == p) $ addMessage "You feel stupid!"
-      modifyEntity e ( modifyEntityHp (-999))
+      when isPlayer $ addMessage "You feel stupid!"
+      modifyEntity e (modifyEntityHp (-999)
+                     .addEntityTime (itemUseCost e pm))
     Teleport  -> do
       addMessage useMsg
       newp <- io $ randFloor (level g)
-      modifyEntity e (modifyEntityPos newp)
+      modifyEntity e (modifyEntityPos newp
+                     .addEntityTime (itemUseCost e pm))
       addMessage "Woosh!"
       updateVision
     Yuck      -> do
       addMessage useMsg
-      when (e == p) $ addMessage "Yuck!"
+      modifyEntity e (addEntityTime (itemUseCost e pm))
+      when isPlayer $ addMessage "Yuck!"
       
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
