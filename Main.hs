@@ -288,13 +288,14 @@ randFloor l = iterateUntil (isFloor l) (randomV2 (bounds l))
 
 -- | find n non-repeating random positions that are walkable
 randFloors :: Level -> Int -> IO [Vector2]
-randFloors l n =
+randFloors l n = do
+  let floorTiles = map fst $ filter (\(_,c) -> c `elem` ".⋅") $ assocs l
+  when (length floorTiles <= n) $
+    error "randFloors: given level had fewer floor tiles than were requested"
   flip execStateT [] $
-  -- I need to check if there are even enough floor tiles
-  -- for this to terminate
     replicateM_ n $ do
       ps' <- get
-      xy  <- iterateUntil (`notElem` ps') (liftIO $ randFloor l)
+      xy  <- liftIO (randomElem floorTiles) `satisfying` (`notElem` ps')
       modify (xy:)
 
 -- | check if two rooms overlap
@@ -332,7 +333,7 @@ mkRandRooms lbounds = do
   rooms <- flip execStateT [] $
     replicateM_ 1000 $ do
       rooms <- get
-      r <- iterateUntil (goodRoom lbounds) (liftIO (createRoom lbounds))
+      r <- liftIO (createRoom lbounds) `satisfying` goodRoom lbounds
       unless (r `roomOverlapAny` rooms) (modify (r:))
 
   when (null rooms)
@@ -761,7 +762,7 @@ modifyEntity :: Entity -> (Entity -> Entity) -> Game ()
 modifyEntity e f = do
   g  <- get
   en <- gets entities
-  put $ g { entities = map (\e' -> if e' == e then f e' else e') en }
+  put $ g { entities = map (\e' -> if pos e' == pos e then f e' else e') en }
 
 -- |    The time needed to perform an action is:
 --
@@ -782,49 +783,53 @@ itemUseCost e i = 2000 `div` (speed e + iSpeed i)
 entityApplyItem :: Entity -> Game ()
 entityApplyItem e = do
   g <- get
-  let (p, _) = getPC (entities g)
-      pm     = equMisc (inv e)
+  let pm     = equMisc (inv e)
       verb   = case iType pm of
                  Potion -> "drink"
                  Scroll -> "read"
                  Corpse -> "squeeze"
                  _      -> "use"
-      isPlayer = e == p
+      isPlayer = pc e
       useMsg = 
         if isPlayer
            then "You " ++ verb ++ " the " ++ iName pm ++ "!"
            -- don't bother using verbs for others :)
            else name e ++ " uses the " ++ iName pm ++ "!"
-                
-  modifyEntity e (addEntityTime (itemUseCost e pm))
-  
+  -- Notes: 
+  -- * modifyEntity should be called once per effect.
+  -- * effects must have addEntityTime, otherwise AI can enter an infinite loop
   case iEffect pm of
     -- item does nothing
     None      -> do
       addMessage useMsg
       when isPlayer $ addMessage "You reflect on your life..."
+      modifyEntity e ( addEntityTime (itemUseCost e pm))
     -- item heals (or hurts)
     Healing n -> do
       addMessage useMsg
-      modifyEntity e (modifyEntityHp n)
+      modifyEntity e ( modifyEntityHp n
+                     . addEntityTime (itemUseCost e pm))
     -- item kills entity (doh)
     Death     -> do
       -- always add useMsg
       addMessage useMsg
       -- only add these when the player uses items
       when isPlayer $ addMessage "You feel stupid!"
-      modifyEntity e (modifyEntityHp (-999))
+      modifyEntity e ( modifyEntityHp (-999)
+                     . addEntityTime (itemUseCost e pm))
     -- item randomly teleports entity
     Teleport  -> do
       addMessage useMsg
-      newp <- io $ randFloor (level g)
-      modifyEntity e (modifyEntityPos newp)
+      newp <- io $ randFloor (level g) `satisfying` (/= pos e)
+      modifyEntity e ( modifyEntityPos newp
+                     . addEntityTime (itemUseCost e pm))
       addMessage "Woosh!"
       updateVision
     -- item does nothing
     Yuck      -> do
       addMessage useMsg
       when isPlayer $ addMessage "Yuck!"
+      modifyEntity e ( addEntityTime (itemUseCost e pm))
     -- item turns entity's weapon into another one
     Transmute -> do
       addMessage useMsg
@@ -832,7 +837,8 @@ entityApplyItem e = do
       -- find a new weapon that's different from the current one
       newWeapon <- io $ randomElem testWeapons `satisfying` (/= curWeapon)
       -- equip it
-      modifyEntity e ( modifyInventory (\i -> i { equWeapon = newWeapon }))
+      modifyEntity e ( modifyInventory (\i -> i { equWeapon = newWeapon })
+                     . addEntityTime (itemUseCost e pm))
       when isPlayer $ addMessage $ "Your " ++ iName curWeapon 
                     ++ " turns into " ++ iName newWeapon ++ "!"
 
