@@ -7,6 +7,7 @@ import Data.Array.IArray
 import Data.Array.IO
 import Data.List (sortBy, find)
 import Data.Ord (comparing)
+import Data.Char
 import qualified Data.Set as Set
 import Data.Maybe
 import System.Random
@@ -39,11 +40,12 @@ curses = lift
 
 data Side = T | B | L | R -- room sides
 
-data ItemType = Weapon -- ']'
+data ItemType = Weapon -- '|'
               | Armor  -- '['
               | Potion -- '!'
               | Scroll -- '?'
               | Corpse -- '%'
+              | Food   -- ','
               deriving (Eq, Show, Read)
 
 data ItemEffect = None
@@ -135,8 +137,8 @@ testWeapons = [Item Weapon "Sword of Test +1" 100 4 0 1500 None
               ]
 
 testArmors :: [Item]
-testArmors = [Item Armor "Tested Leather Armor" 100 0 1 5000 None
-             ,Item Armor "Fancy Suit" 150 0 0 2000 None
+testArmors = [Item Armor "Tested Leather Armor" 100 0 2 5000 None
+             ,Item Armor "Fancy Suit" 150 0 1 2000 None
              ,Item Armor "Power Armor mk2" 66 0 6 30000 None
              ]
 
@@ -149,6 +151,11 @@ testMisc = [Item Scroll "Scroll of Modern Medicine" 100 0 0 100 (Healing 6)
            ,Item Corpse "Rodent Corpse" 100 0 0 1000 Yuck
            ,Item Scroll "Book of Transmutation" 100 0 0 1000 Transmute
            ]
+
+noWeapon, noArmor, noMisc :: Item
+noWeapon = Item Weapon "Prosthetic Fists" 100 1 0 0 None
+noArmor  = Item Armor "Wizard's Cape" 100 0 0 0 None
+noMisc   = Item Scroll "New York Times Magazine" 100 0 0 0 None
 
 testEnemies :: [Entity]
 testEnemies = 
@@ -188,14 +195,14 @@ load = io (readFile "saveFile") >>= io . readIO >>= put
 
 mkPlayer :: Vector2 -> IO Entity
 mkPlayer pos' = do
-  pinv <- randInv
+--  pinv <- randInv
   return Entity 
          { pc       = True
          , name     = "Player"
          , pos      = pos'
          , sym      = '@'
          , hp       = (20, 20)
-         , inv      = pinv
+         , inv      = Inventory noWeapon noArmor noMisc [] 
          , weight   = 75000
          , speed    = 100
          , nextMove = 0
@@ -295,7 +302,7 @@ randFloors l n = do
   flip execStateT [] $
     replicateM_ n $ do
       ps' <- get
-      xy  <- liftIO (randomElem floorTiles) `satisfying` (`notElem` ps')
+      xy  <- liftIO $ randomElem floorTiles `satisfying` (`notElem` ps')
       modify (xy:)
 
 -- | check if two rooms overlap
@@ -510,6 +517,7 @@ helpString = ["Hello, hoodie here (press ? again to return)"
              ,"Attack by moving into enemies"
              ,"Wait for a turn by pressing ."
              ,"i to look at your inventory"
+             ,"e/d - equip drop"
              ,"a to apply your misc item"
              ,", to pick up items below you"
              ,"Descend to the next level with > when you are on stairs"
@@ -519,21 +527,32 @@ helpString = ["Hello, hoodie here (press ? again to return)"
 
 displayHelp :: Game ()
 displayHelp = do
-  g <- get
-  curses $ draw $ do
-    clear (bounds (level g))
-    forM_ [1..length helpString] $ \y ->
-      drawStringAt (1, y) $ center 80 (helpString !! (y-1))
-  _ <- curses $ waitForChrs "?"
-  curses $ draw (clear (bounds (level g)))
+  bs <- bounds `fmap` gets level
+  curses $ do
+    draw $ do
+      clear bs
+      forM_ [1..length helpString] $ \y ->
+        drawStringAt (1, y) $ center 80 (helpString !! (y-1))
+    waitForChrs "?"
+  return ()
 
-displayPlayerInventory :: Game ()
-displayPlayerInventory = do
-  p <- (fst . getPC) `fmap` gets entities
-  addMessage $ "Inventory: W: " 
-                      ++ iName (equWeapon (inv p)) ++
-               " A: " ++ iName (equArmor (inv p)) ++
-               " M: " ++ iName (equMisc (inv p)) 
+displayPlayerInventory :: Inventory -> Game ()
+displayPlayerInventory is = do
+  bs <- bounds `fmap` gets level
+  let iItems  = zip [0..] (storedItems is)
+      letters = ['a'..]
+  curses $ do
+    draw $ do
+      clear bs
+      drawStringAt (1,1) "Items:"
+      drawStringAt (1,2) $ "Wielded: " ++ iName (equWeapon is)
+      drawStringAt (1,3) $ "Worn: " ++ iName (equArmor is)
+      drawStringAt (1,4) $ "Active: " ++ iName (equMisc is)
+      forM_ iItems $ \(y, i) -> do
+        drawStringAt (1, y + 5) $ letters !! y : ". " ++ iName i
+    render
+    _ <- waitForChrs $ ['A'..'z']
+    return ()
 
 withReverse :: Update () -> Update ()
 withReverse upact = do
@@ -543,12 +562,13 @@ withReverse upact = do
 
 itemSym :: Item -> Char
 itemSym i = case iType i of
-  Weapon -> ']'
+  Weapon -> '|'
   Armor  -> '['
   Potion -> '!'
   Scroll -> '?'
   Corpse -> '%'
-
+  Food   -> ','
+  
 drawEverything :: Game ()
 drawEverything  = do
   g  <- get
@@ -614,7 +634,6 @@ movePlayer :: Char -> Game ()
 movePlayer c = do
   l  <- gets level
   en <- gets entities
-  is <- gets items
   let (p,en') = getPC en
       -- position player wants to move to
       newp    = keyToDir c (pos p)
@@ -627,10 +646,19 @@ movePlayer c = do
       Nothing ->
         if l `walkableL` newp
           then do
-            let i = newp `lookup` is
-            when (isJust i) $ addMessage $ "You see here the "++iName (fromJust i)
+            is <- itemsAt newp
+            case length is of
+              0 -> return ()
+              1 -> addMessage $ "You see here " ++ iName (head is)
+              _ -> addMessage $ "You see here " ++ 
+                    concatMap (\i -> iName i ++ ", ") (init is)
+                    ++ "and " ++ iName (last is)
             p `moveEntityTo` newp
           else addMessage "You bump into an obstacle!"
+
+itemsAt :: Vector2 -> Game [Item]
+itemsAt v = gets items >>= return . map snd . filter (\(p,_) -> p == v)
+  
 
 modifyEntityAt :: [Entity] -> Vector2 -> (Entity -> Entity) -> [Entity]
 modifyEntityAt es p f =
@@ -703,7 +731,7 @@ updateVision' g = do
   return g'
 
 getGoodCh :: Game Char
-getGoodCh = curses $ waitForChrs "?hjklyubnqsdpria.,>" 
+getGoodCh = curses $ waitForChrs "?hjklyubnqpria.,>ed" 
 
 setQuit :: Game ()
 setQuit = do 
@@ -748,10 +776,10 @@ gameTurn = do
         'p' -> displayMessageLog
         '?' -> displayHelp
         ',' -> playerPickupItem
+        'd' -> playerDropItem
         'a' -> entityApplyItem e
-        'i' -> displayPlayerInventory
-        's' -> save
-        'd' -> load
+        'i' -> displayPlayerInventory (inv e)
+        'e' -> playerWieldItem
         'r' -> mkDungeonLevel >> updateVision
         '>' -> descend >> updateVision
         _   -> movePlayer c >> updateVision
@@ -847,21 +875,130 @@ satisfying = flip iterateUntil
 
 modifyInventory :: (Inventory -> Inventory) -> Entity -> Entity
 modifyInventory f e = e { inv = f (inv e) }
-                       
+                      
+-- remove the nth item from the items at position                      
+removeFloorItem :: Vector2 -> Int -> Game ()
+removeFloorItem v n = do
+  g <- get
+  is <- itemsAt v
+      -- new items on the floor
+  let new  = map (\x -> (v, x)) (removeElem is n)
+      -- the rest of them
+      rest = filter (\x -> fst x /= v) (items g)
+  put $ g { items = new ++ rest }
+
+-- display a menu to pick an item, and return the item and its index in the 
+-- list
+pickItem :: [Item] -> Game (Maybe (Int, Item))
+pickItem is = do
+  bs <- bounds `fmap` gets level
+  let iItems  = zip [0..] is
+      letters = ['a'..]
+  ch <- curses $ do
+    draw $ do
+      clear bs
+      drawStringAt (1,1) "Items:"
+      forM_ iItems $ \(y, i) -> do
+        drawStringAt (1, y + 2) $ letters !! y : ". " ++ iName i
+    render
+    waitForChrs ['A'..'z']
+  let idx = ord ch - 97
+  if idx > length is || null is
+    then do addMessage "No such item."
+            return Nothing
+    else do return $ Just (idx, is !! idx)
+
+-- the player can pick up items. 
+  -- the item is removed from the floor
+  -- the item is placed into the general inventory of the player
+  -- if there is more than one item, the player gets a menu to choose which
+  -- item to pick up.
+-- the player has an inventory with 15 slots
+-- 'i' displays an inventory. from there the player can
+--  'e' - equip an item from the general inventory
+       -- the item is equipped
+       -- the item is removed from the general inventory
+       -- the item that was previous equipped is added back into the G.I.
+       -- unless it's one of the default items
+--  'd' - drop an item
+       -- the item is removed from the general inventory
+       -- the item is added to the items list at the player's feet
+--  'U' - unwield an item
+       -- the item is unequipped, and replaced with the defaults 
+       -- (fists, wizard's robe, NYT)
+
+playerDropItem :: Game ()
+playerDropItem = do
+  g  <- get
+  p  <- fst `fmap` getPC `fmap` gets entities
+  mi <- pickItem (storedItems (inv p))
+  case mi of
+    Nothing    -> return ()
+    Just (n,i) -> do
+      put $ g { items = (pos p, i) : items g }
+      modifyEntity p ( modifyInventory (removeStoredItemNth n)
+                     . addEntityTime (itemUseCost p i))
+      addMessage $ "You drop the " ++ iName i
+
+playerWieldItem :: Game ()
+playerWieldItem = do
+  -- player
+  p <- fst `fmap` getPC `fmap` gets entities
+  -- pick an item in the inventory
+  mi <- pickItem (storedItems (inv p))
+  case mi of
+    Nothing    -> return ()
+    -- wield the selected item, remove it from the general inventory
+    Just (n,i) -> do
+      modifyEntity p ( modifyInventory (wieldItem i
+                     . removeStoredItemNth n)
+                     . addEntityTime (itemUseCost p i))
+      addMessage $ "You wield the " ++ iName i
+
+removeStoredItemNth :: Int -> Inventory -> Inventory
+removeStoredItemNth n iv = iv { storedItems = removeElem (storedItems iv) n }
+
+wieldItem :: Item -> Inventory -> Inventory
+wieldItem i iv =
+  let (ww, wa, wm) = (equWeapon iv, equArmor iv, equMisc iv)
+  in case iType i of
+      Weapon -> iv { equWeapon = i, storedItems = ww : (storedItems iv) }
+      Armor  -> iv { equArmor  = i, storedItems = wa : (storedItems iv) }
+      _      -> iv { equMisc   = i, storedItems = wm : (storedItems iv) }
+
+addItem :: Item -> Inventory -> Inventory
+addItem i iv = iv { storedItems = i : storedItems iv }
+
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
 playerPickupItem = do
   g <- get
-      -- items on the floor
-  let is      = items g
-      -- player and friends
-      (p, en) = getPC (entities g)
-      -- current inventory
-      cinv    = inv p
+  let -- player and friends
+      (p, _) = getPC (entities g)
   -- is there an item below us?
-  case pos p `lookup` is of
+  is <- itemsAt (pos p)
+  if length (storedItems (inv p)) >= 10
+    then addMessage "You can't carry anything more!"
+    else do
+      case length is of
+        0 -> addMessage "There's nothing here to pick up!"
+        1 -> do 
+          let i = head is
+          addMessage $ "You pick up the " ++ iName i ++ "!"
+          modifyEntity p ( modifyInventory (addItem i)
+                         . addEntityTime (itemUseCost p i))
+          removeFloorItem (pos p) 0
+        _ -> do
+          mi <- pickItem is
+          case mi of 
+            Nothing    -> return ()
+            Just (n,i) -> do
+              addMessage $ "You pick up the "++ iName i ++ "!"
+              modifyEntity p ( modifyInventory (addItem i)
+                             . addEntityTime (itemUseCost p i))
+              removeFloorItem (pos p) n
+{-      
     Nothing -> 
-       addMessage "There's nothing here to pick up!"
     Just i  -> do 
           -- make a new inventory based on the type of the item
       let newinv = case iType i of
@@ -881,8 +1018,7 @@ playerPickupItem = do
       -- picking stuff up takes time
       modifyEntity p (addEntityTime (itemUseCost p i))
       -- add message
-      addMessage $ "You pick up the " ++ iName i ++ "!"
-
+-}
 -- | After one turn, set messages to viewed so they don't display any more
 ageMessages :: Game ()
 ageMessages = do
@@ -951,7 +1087,7 @@ processNegativeHpEntities = do
        -- add messages
        mapM_ addMessage dms
        g' <- get
-       put $ g' { entities = new, items = corpses ++ items g' }
+       put $ g' { entities = new, items = items g' ++ corpses }
 
 entityToCorpse :: Entity -> Item
 entityToCorpse e =
@@ -1103,6 +1239,9 @@ swap    (a, b) =  (b, a)
 
 replaceElem :: [a] -> a -> Int -> [a]
 replaceElem es e n = take n es ++ e : drop (n + 1) es
+
+removeElem :: [a] -> Int -> [a]
+removeElem es n = take n es ++ drop (n + 1) es
 
 randomElem :: [a] -> IO a
 randomElem xs = (xs !!) `fmap` randomRIO (0, length xs - 1)
