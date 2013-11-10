@@ -11,18 +11,17 @@ import Data.Char
 import qualified Data.Set as Set
 import Data.Maybe
 import System.Random
+import qualified Data.List.Zipper as Z
 import Control.Monad.Loops (iterateUntil)
 import Data.Graph.AStar (aStar)
 import UI.NCurses
 import FOV
 
-type Vector2    = (Int, Int)
-type Room       = (Vector2, Vector2) -- xy, size
-type LevelPart  = [(Vector2, Char)] -- update for array 
--- change Level to include entities, dlvl, and narr, 
--- then change dungeon to [dungeon] to allow many levels
-type Level      = Array Vector2 Char
-type Neighbours = Array Vector2 (Set.Set Vector2)
+type Vector2     = (Int, Int)
+type Room        = (Vector2, Vector2) -- xy, size
+type TileMapPart = [(Vector2, Char)] -- update for array 
+type TileMap     = Array Vector2 Char
+type Neighbours  = Array Vector2 (Set.Set Vector2)
 
 newtype GameT s m a = GameT (StateT s m a)
     deriving (Functor, Monad, MonadIO, MonadTrans, MonadState s)
@@ -95,16 +94,24 @@ data Entity = Entity
     , seeingL  :: Array Vector2 Bool -- ^what the player *currently* sees
     } deriving (Eq, Show, Read)
 
-data GameState = GameState
-    { level    :: Level
+data Level = Level 
+    { tilemap  :: TileMap
+    , stairs   :: (Vector2, Vector2) -- up and down stairs
     , entities :: [Entity]
     , items    :: [(Vector2, Item)]
+    , narr     :: Neighbours
+    } deriving (Eq, Show, Read)
+
+data GameState = GameState
+    { levels   :: Z.Zipper Level
     , msgs     :: [(Int, Bool, String)] -- ^ turn added, seen by player, message
     , turn     :: Int
     , pquit    :: Bool
-    , narr     :: Neighbours
     , dlvl     :: Int
-    } deriving (Eq, Show, Read)
+    } deriving (Eq, Show)
+
+cur :: Z.Zipper Level -> Level
+cur = Z.cursor
 
 -- | get the next actor and the rest
 entityPQ :: [Entity] -> (Entity, [Entity])
@@ -123,7 +130,7 @@ isPC :: Entity -> Bool
 isPC = pc
 
 -- empty level
-emptyL :: Level
+emptyL :: TileMap
 emptyL = listArray ((1,1), (80, 22)) (repeat ' ')
 
 -- enemies don't use seenL/seeingL, so use this dummy array
@@ -187,11 +194,13 @@ randInv = do
 
 -- to save disk space, the neighbours array could be discarded here
 -- and then rebuilt on load
+{-
 save :: Game ()
 save = get >>= io . writeFile "savefile" . show
 
 load :: Game ()
 load = io (readFile "saveFile") >>= io . readIO >>= put
+-}
 
 mkPlayer :: Vector2 -> IO Entity
 mkPlayer pos' =
@@ -213,10 +222,10 @@ mkPlayer pos' =
 mkEnemiesOnLevel :: Int -- number of enemies
                  -> Int -- nextMove of enemies, set to the nextMove of the player
                  -- when descending the dungeon
-                 -> Level 
+                 -> TileMap
                  -> IO [Entity]
 mkEnemiesOnLevel dl nm l = do
-  en <- randomRIO (1 * dl, 3 * dl) -- amount of enemies
+  en <- randomRIO (0, 1 * dl) -- amount of enemies
   es <- randFloors l en            -- positions
   ei <- replicateM en randInv      -- inventories
   em <- replicateM en (randomElem testEnemies) -- random enemies
@@ -228,7 +237,7 @@ mkEnemiesOnLevel dl nm l = do
     -- add normal enemies
     zipWith3 (\e p i -> e { pos = p, inv = i, nextMove = nm }) em es ei
 
-mkItemsOnLevel :: Level -> IO [(Vector2, Item)]
+mkItemsOnLevel :: TileMap -> IO [(Vector2, Item)]
 mkItemsOnLevel l = do
   i  <- randomRIO (3,9)
   is <- replicateM i (randomElem testItems)
@@ -238,46 +247,58 @@ mkItemsOnLevel l = do
 -- | Creates a brand-new, fully filled Game.
 mkDungeonLevel :: Game ()
 mkDungeonLevel = do
-  l  <- io $ mkRandRooms (80, 22) -- dungeon, or level
+  l  <- io $ mkRandRooms (80, 22) -- tilemap
   p  <- io $ randFloor l          -- player position
   ep <- io $ randFloor l          -- exit position
-  is <- io $ mkItemsOnLevel l
-  p' <- io $ mkPlayer p           -- player position
-  entities' <- io $ mkEnemiesOnLevel 1 0 l
+  is <- io $ mkItemsOnLevel l     -- items
+  p' <- io $ mkPlayer p           -- player entity
+  enemies' <- io $ mkEnemiesOnLevel 1 0 l
+  let l' = Level 
+            { tilemap  = l
+            , stairs   = (p, ep)
+            , entities = p' : enemies'
+            , items    = is
+            , narr     = mkNeighbourArray l ".⋅+#SDk"
+            }
   put GameState
-    { entities = p' : entities' 
-    , items    = is
-    , level    = l // [(ep, '>')]
+    { levels   = Z.insert l' Z.empty
     , msgs     = [(0, False, "Welcome to hoodie! (press ? for help)")]
     , turn     = 0
     , pquit    = False
-    , narr     = mkNeighbourArray l ".⋅+#SDk"
     , dlvl     = 1
     }
 
 -- | changes all the things that need the change between floors
 descendLevel :: Game ()
 descendLevel = do
-  g <- get
-  let (p,_) = getPC (entities g) -- get player
-  l  <- io $ mkRandRooms (80, 22)
-  pp <- io $ randFloor l -- new player position
-  ep <- io $ randFloor l -- exit position
-  is <- io $ mkItemsOnLevel l
-  let dlvl' = dlvl g + 1
-      p'    = p { pos     = pp
-                , seenL   = listArray ((1,1), (80,22)) (repeat False)
-                , seeingL = listArray ((1,1), (80,22)) (repeat False)
-                }
-  entities' <- io $ mkEnemiesOnLevel dlvl' (nextMove p + 1) l
-  put $ g
-    { entities = p' : entities' 
-                 -- level 5 is the last level
-    , level    = if dlvl' == 5 then l else l // [(ep, '>')]
-    , narr     = mkNeighbourArray l ".⋅+#SDk"
-    , items    = is
-    , dlvl     = dlvl'
-    }
+  g  <- get
+  ls <- gets levels
+  l  <- cur `fmap` gets levels
+  let (p,_) = getPC (entities l) -- get player
+  -- check if there's a level below us already generated, otherwise make
+  -- a new level
+  ls' <- if Z.beginp ls
+           then do -- we're making a new level
+             tm <- io $ mkRandRooms (80,22)
+             pp <- io $ randFloor tm -- new player position
+             ep <- io $ randFloor tm -- exit position
+             is <- io $ mkItemsOnLevel tm
+             en <- io $ mkEnemiesOnLevel 1 (nextMove p + 1) tm
+             let p' = p { pos     = pp
+                        , seenL   = listArray ((1,1), (80,22)) (repeat False)
+                        , seeingL = listArray ((1,1), (80,22)) (repeat False)
+                        }
+             return $ Z.insert Level 
+               { tilemap  = tm
+               , stairs   = (pos p', ep)
+               , entities = p' : en
+               , items    = is
+               , narr     = mkNeighbourArray tm ".⋅+#SDk"
+               } ls
+           -- there's already a generated level below us, so just switch
+           else return $ Z.left ls
+  put $ g { levels = ls' 
+          , dlvl = 1 + dlvl g }
 
 -- | make a random pair within given bounds
 randomV2 :: (Vector2, Vector2) -> IO Vector2
@@ -286,15 +307,15 @@ randomV2 ((x1, y1), (x2, y2)) = do
   y <- randomRIO (y1, y2)
   return (x,y)
 
-isFloor :: Level -> Vector2 -> Bool
+isFloor :: TileMap -> Vector2 -> Bool
 isFloor l p = l ! p `elem` ".⋅"
 
 -- | find a random part of the level that's walkable
-randFloor :: Level -> IO Vector2
+randFloor :: TileMap -> IO Vector2
 randFloor l = iterateUntil (isFloor l) (randomV2 (bounds l))
 
 -- | find n non-repeating random positions that are walkable
-randFloors :: Level -> Int -> IO [Vector2]
+randFloors :: TileMap -> Int -> IO [Vector2]
 randFloors l n = do
   let floorTiles = map fst $ filter (\(_,c) -> c `elem` ".⋅") $ assocs l
   when (length floorTiles <= n) $
@@ -334,7 +355,7 @@ goodRoom :: Vector2 -> Room -> Bool
 goodRoom (sx, sy) ((x, y), (rx, ry)) = x + rx < sx - 3 && y + ry < sy - 3
 
 -- | try really hard to make a servicable dungeon
-mkRandRooms :: Vector2 -> IO Level
+mkRandRooms :: Vector2 -> IO TileMap
 mkRandRooms lbounds = do
   -- try 1000 times to create good non-overlapping rooms
   rooms <- flip execStateT [] $
@@ -346,7 +367,7 @@ mkRandRooms lbounds = do
   when (null rooms)
     (error "dungeon generator mkRandRooms didn't make any rooms")
 
-  let room_lps = mkRooms rooms :: LevelPart
+  let room_lps = mkRooms rooms :: TileMapPart
       narrP    = mkNeighbourArray (emptyL // room_lps) " "
 
   paths1 <- connectRandomRoomToAll narrP rooms
@@ -356,7 +377,7 @@ mkRandRooms lbounds = do
 
 -- | connect a random room from the list to all rooms. Cheap way to
 -- ensure that all rooms are connected.
-connectRandomRoomToAll :: Neighbours -> [Room] -> IO LevelPart
+connectRandomRoomToAll :: Neighbours -> [Room] -> IO TileMapPart
 connectRandomRoomToAll narrP rooms = do
   rc <- randomElem rooms
   concat `fmap` catMaybes `fmap` forM rooms (\r ->
@@ -365,7 +386,7 @@ connectRandomRoomToAll narrP rooms = do
       else return Nothing)
 
 -- | make n random connections between rooms
-connectRandomRooms :: Neighbours -> [Room] -> Int -> IO LevelPart
+connectRandomRooms :: Neighbours -> [Room] -> Int -> IO TileMapPart
 connectRandomRooms narrP rooms n =
   concat `fmap` catMaybes `fmap` replicateM n
     (do r1 <- randomElem rooms
@@ -376,7 +397,7 @@ connectRandomRooms narrP rooms n =
 -- | connect two rooms, using corridors generated by A* pathfinding.
 -- Randomly picks a side, so all rooms must have one tile free space
 -- around them.
-connectRooms :: Neighbours -> Room -> Room -> IO (Maybe LevelPart)
+connectRooms :: Neighbours -> Room -> Room -> IO (Maybe TileMapPart)
 connectRooms narrP r1 r2 = do
   side1 <- randomRIO (1, 4::Int)
   side2 <- randomRIO (1, 4::Int)
@@ -413,7 +434,7 @@ distance :: Vector2 -> Vector2 -> Int
 distance (a1,a2) (b1, b2) =
     (b1 - a1) + (b2 - a2)
 
-maybeLookup :: Level -> Vector2 -> Maybe Char
+maybeLookup :: TileMap -> Vector2 -> Maybe Char
 maybeLookup l p@(x,y) =
   let ((x1, y1), (x2, y2)) = bounds l
    in if x > x2 || x < x1 || y > y2 || y < y1
@@ -421,7 +442,7 @@ maybeLookup l p@(x,y) =
        else Nothing
 
 -- | create a array of the sets of neighbours for each tile
-mkNeighbourArray :: Level -> String -> Neighbours
+mkNeighbourArray :: TileMap -> String -> Neighbours
 mkNeighbourArray l tt =
   let (a@(x1,y1), b@(x2,y2)) = bounds l
    in listArray (a, b) [setOfNeighbours l tt (x,y) |
@@ -429,7 +450,7 @@ mkNeighbourArray l tt =
                         y <- [y1..y2]]
 
 -- | create a set of all neighbours of a point that are walkable
-setOfNeighbours :: Level -> String -> Vector2 -> Set.Set Vector2
+setOfNeighbours :: TileMap -> String -> Vector2 -> Set.Set Vector2
 setOfNeighbours l tt p =
   Set.fromList
   . map fst
@@ -460,23 +481,23 @@ mkPath :: Neighbours
        -- a path from a room, the first tile and last tiles are
        -- impassable walls
        -> (Vector2 -> Vector2)
-       -> Maybe LevelPart
+       -> Maybe TileMapPart
 mkPath narrP p1 p2 f1 f2 = do
   p' <- simpleAStar narrP (f1 p1) (f2 p2)
   return $ zip p' (repeat '#') ++ [(f1 p1, '#'), (p1,'+'), (p2,'+')]
 
 -- level construction
-mkHwall :: Char -> Int -> Vector2 -> LevelPart
+mkHwall :: Char -> Int -> Vector2 -> TileMapPart
 mkHwall ch len (x,y) = zip (zip [x..(x-1+len)] (repeat y)) (repeat ch)
 
-mkVwall :: Char -> Int -> Vector2 -> LevelPart
+mkVwall :: Char -> Int -> Vector2 -> TileMapPart
 mkVwall ch len (x,y) = zip (zip (repeat x) [y..(y-1+len)]) (repeat ch)
 
 -- borders:
 -- ┘ ┐ ┌ └ │ ─ ├  ┬  ┤  ┴  ┼ ╭ ╮ ╯ ╰
 -- ═ ║ ╒ ╓ ╔ ╕ ╖ ╗ ╘ ╙ ╚ ╛ ╜ ╝ ╞ ╟
 -- ╠ ╡ ╢ ╣ ╤ ╥ ╦ ╧ ╨ ╩ ╪ ╫ ╬
-mkRoom :: Room -> LevelPart
+mkRoom :: Room -> TileMapPart
 mkRoom ((x1, y1), (sx, sy)) = concat
   -- floors
   [[((x,y), '⋅') | y <- [y1..(y1+sy)], x <- [x1..(x1+sx)]]
@@ -489,10 +510,10 @@ mkRoom ((x1, y1), (sx, sy)) = concat
   ,[((x1, y1),    '╔'), ((x1+sx, y1+sy), '╝')
   ,((x1,  y1+sy), '╚'), ((x1+sx, y1),    '╗')]]
 
-mkRooms :: [Room] -> LevelPart
+mkRooms :: [Room] -> TileMapPart
 mkRooms = concatMap mkRoom
 
-walkableL :: Level -> Vector2 -> Bool
+walkableL :: TileMap -> Vector2 -> Bool
 walkableL l p@(x,y) =
   let ((x1,y1), (x2,y2)) = bounds l
    in (x < x2 || x > x1 || y < y2 || y > y1) && (l ! p `elem` ".⋅+#SDk>")
@@ -501,14 +522,14 @@ walkableL l p@(x,y) =
 displayMessageLog :: Game ()
 displayMessageLog = do
   g <- get
-  let ((x1,_), (x2,y2)) = bounds (level g)
+  let bs@((x1,_), (x2,y2)) = bounds (tilemap (Z.cursor (levels g)))
   curses $ draw $ do
-    clear (bounds (level g))
+    clear bs
     drawStringAt (1,1) "Message log: ('p' to return)"
     forM_ (zip [3..] (take (y2 - 5) (msgs g))) $ \(n,(t,_,m)) ->
       drawStringAt (x1, n) $ take (x2 - 5) "[" ++ show t ++ "] " ++ m
   _ <- curses $ waitForChrs "p"
-  curses $ draw (clear (bounds (level g)))
+  curses $ draw $ clear bs
 
 helpString :: [String]
 helpString = ["Hello, hoodie here (press ? again to return)"
@@ -527,7 +548,7 @@ helpString = ["Hello, hoodie here (press ? again to return)"
 
 displayHelp :: Game ()
 displayHelp = do
-  bs <- bounds `fmap` gets level
+  bs <- bounds `fmap` tilemap `fmap` Z.cursor `fmap` gets levels
   curses $ do
     draw $ do
       clear bs
@@ -538,7 +559,7 @@ displayHelp = do
 
 displayPlayerInventory :: Inventory -> Game ()
 displayPlayerInventory is = do
-  bs <- bounds `fmap` gets level
+  bs <- bounds `fmap` tilemap `fmap` Z.cursor `fmap` gets levels
   let iItems  = zip [0..] (storedItems is)
       letters = ['a'..]
   curses $ do
@@ -571,20 +592,26 @@ itemSym i = case iType i of
   
 drawEverything :: Game ()
 drawEverything  = do
-  g  <- get
-  l  <- gets level
-  let (p, en') = getPC (entities g)
+  g <- get
+  l <- Z.cursor `fmap` gets levels
+  let (p, en') = getPC (entities l)
+      tm       = tilemap l
       seen     = seenL p
       seeing   = seeingL p
+      (u,d)    = stairs l
 
   curses $ draw $ do
-    clear (bounds l)
+    clear (bounds tm)
     -- draw level
-    forM_ (indices l) $ \i -> do 
-      when (seen ! i) (drawStringAt i [l ! i])
-      when (seeing ! i) (withReverse (drawStringAt i [l ! i]))
+    forM_ (indices tm) $ \i -> do 
+      when (seen ! i) (drawStringAt i [tm ! i])
+      when (seeing ! i) (withReverse (drawStringAt i [tm ! i]))
+--      drawStringAt i [tm ! i]
+    -- draw stairs
+    when (seeing ! u) $ drawStringAt u "<"
+    when (seeing ! d) $ drawStringAt d ">"
     -- draw items
-    forM_ (items g) $ \(ip,i) -> 
+    forM_ (items l) $ \(ip,i) -> 
       when (seeing ! ip) (drawStringAt ip [itemSym i])
     -- draw enemies
     forM_ en' $ \e ->
@@ -632,9 +659,10 @@ keyToDir c =
 -- | Move the player, fail to move the player, rest, or attack an entity
 movePlayer :: Char -> Game ()
 movePlayer c = do
-  l  <- gets level
-  en <- gets entities
+  l  <- Z.cursor `fmap` gets levels
   let (p,en') = getPC en
+      en = entities l
+      tm = tilemap l
       -- position player wants to move to
       newp    = keyToDir c (pos p)
       
@@ -644,7 +672,7 @@ movePlayer c = do
       Just e -> attackEntity p e
       -- or not
       Nothing ->
-        if l `walkableL` newp
+        if tm `walkableL` newp
           then do
             is <- itemsAt newp
             case length is of
@@ -657,7 +685,9 @@ movePlayer c = do
           else addMessage "You bump into an obstacle!"
 
 itemsAt :: Vector2 -> Game [Item]
-itemsAt v = gets items >>= return . map snd . filter (\(p,_) -> p == v)
+itemsAt v = do
+  l <- items `fmap` Z.cursor `fmap` gets levels
+  return $ map snd $ filter (\(p,_) -> p == v) l
 
 modifyEntityAt :: [Entity] -> Vector2 -> (Entity -> Entity) -> [Entity]
 modifyEntityAt es p f =
@@ -685,14 +715,36 @@ addMessage m = do
 
 descend :: Game ()
 descend = do
-  g <- get
-  if level g ! pos (fst (getPC (entities g))) == '>'
+  level <- Z.cursor `fmap` gets levels
+  let exit = snd (stairs level)
+  if pos (fst (getPC (entities level))) == exit
      then do
-       curses $ draw $ clear (bounds (level g))
+       curses $ draw $ clear (bounds (tilemap level))
        descendLevel
-       addMessage "You descend into the next level!"
+       addMessage "You descend the stairs!"
      else addMessage "There are no stairs here!"
 
+ascend :: Game ()
+ascend = do
+  g <- get
+  level <- Z.cursor `fmap` gets levels
+  let exit  = fst (stairs level)
+      (p,_) = getPC (entities level)
+  if Z.endp (Z.right (levels g))
+    then if pos (fst (getPC (entities level))) == exit
+            then addMessage "Are you sure you want to exit the dungeon?"
+            else addMessage "There are no up stairs here!"
+    else
+      if pos (fst (getPC (entities level))) == exit
+        then do
+          let prevexit = snd $ stairs $ Z.cursor $ Z.right $ levels g
+          curses $ draw $ clear (bounds (tilemap level))
+          put $ g { levels = Z.right (levels g) 
+                  , dlvl = dlvl g - 1 }
+          moveEntityTo p prevexit
+          addMessage "You ascend the stairs!"
+        else addMessage "There are no up stairs here!"
+          
 -- | merge the old "seen" array with the new "seeing" array
 -- to produce an updated "seen" array
 updateSeen :: Array Vector2 Bool
@@ -706,17 +758,18 @@ updateSeen old_seen new_seeing = do
 -- | update the "seen" and "seeing" arrays
 updateVision' :: GameState -> IO GameState
 updateVision' g = do
-  let l       = level g
-      (p,en') = getPC (entities g)
+  let l       = Z.cursor $ levels g
+      tm      = tilemap l
+      (p,en') = getPC (entities l)
       pp      = pos p
       seen    = seenL p
   
   (seeing',seen') <- do
     s <- ioInit
-    newSeeing <- newArray (bounds l) False :: IO (IOUArray Vector2 Bool)
+    newSeeing <- newArray (bounds tm) False :: IO (IOUArray Vector2 Bool)
 
     let lightPoint x y = writeArray newSeeing (x, y) True
-        isOpaque x y   = return (l ! (x, y) `elem` " ═║╔╝╚╗")
+        isOpaque x y   = return (tm ! (x, y) `elem` " ═║╔╝╚╗")
 
     -- use FOV's circle to write into the newSeeing array
     circle s pp 5 lightPoint isOpaque
@@ -725,12 +778,14 @@ updateVision' g = do
     return (newSeeing', newSeen')
 
   let np = p { seenL = seen', seeingL = seeing' }
-      g' = g { entities = np:en' }
+      ne = np : en'
+      nl = l { entities = ne }
+      g' = g { levels = Z.replace nl (levels g) }
 
   return g'
 
 getGoodCh :: Game Char
-getGoodCh = curses $ waitForChrs "?hjklyubnqpria.,>ed" 
+getGoodCh = curses $ waitForChrs "?hjklyubnqpria.,><ed" 
 
 setQuit :: Game ()
 setQuit = do 
@@ -740,7 +795,7 @@ setQuit = do
 -- | Checks if the player is dead and quits if they are.
 isPlayerDead :: Game ()
 isPlayerDead = do
-  en <- gets entities 
+  en <- entities `fmap` Z.cursor `fmap` gets levels
   let php = fst . hp . fst . getPC $ en
   when (php <= 0) $ do
     addMessage "Oh no! You are dead!"
@@ -752,7 +807,7 @@ isPlayerDead = do
 setTurn :: Game ()
 setTurn = do
   g <- get
-  let p = fst . getPC $ entities g
+  p <- fst `fmap` getPC `fmap` entities `fmap` Z.cursor `fmap` gets levels
   put $ g { turn = nextMove p }
   
 -- | This is the main update function, updating one entity per call. The
@@ -762,8 +817,8 @@ setTurn = do
 gameTurn :: Game ()
 gameTurn = do
   processNegativeHpEntities
-  g <- get
-  let en@(e, _) = entityPQ (entities g)
+  l <- Z.cursor `fmap` gets levels
+  let en@(e, _) = entityPQ (entities l)
   if isPC e 
     then do
       setTurn
@@ -781,6 +836,7 @@ gameTurn = do
         'e' -> playerWieldItem
         'r' -> mkDungeonLevel >> updateVision
         '>' -> descend >> updateVision
+        '<' -> ascend >> updateVision
         _   -> movePlayer c >> updateVision
     else processEnemies en
   isPlayerDead
@@ -788,8 +844,12 @@ gameTurn = do
 modifyEntity :: Entity -> (Entity -> Entity) -> Game ()
 modifyEntity e f = do
   g  <- get
-  en <- gets entities
-  put $ g { entities = map (\e' -> if pos e' == pos e then f e' else e') en }
+  ls <- gets levels
+  let l = Z.cursor ls
+      en = entities l
+      ne = map (\e' -> if pos e' == pos e then f e' else e') en
+      nl = l { entities = ne }
+  put $ g { levels = Z.replace nl (levels g) }
 
 -- |    The time needed to perform an action is:
 --
@@ -847,7 +907,7 @@ entityApplyItem e = do
     -- item randomly teleports entity
     Teleport  -> do
       addMessage useMsg
-      newp <- io $ randFloor (level g) `satisfying` (/= pos e)
+      newp <- io $ randFloor (tilemap $ Z.cursor $ levels g) `satisfying` (/= pos e)
       modifyEntity e ( modifyEntityPos newp
                      . addEntityTime (itemUseCost e pm))
       addMessage "Woosh!"
@@ -878,19 +938,22 @@ modifyInventory f e = e { inv = f (inv e) }
 -- remove the nth item from the items at position                      
 removeFloorItem :: Vector2 -> Int -> Game ()
 removeFloorItem v n = do
-  g <- get
+  g  <- get
+  ls <- gets levels
   is <- itemsAt v
       -- new items on the floor
   let new  = map (\x -> (v, x)) (removeElem is n)
       -- the rest of them
-      rest = filter (\x -> fst x /= v) (items g)
-  put $ g { items = new ++ rest }
+      rest = filter (\x -> fst x /= v) (items l)
+      l = Z.cursor ls
+      ne = l { items = new ++ rest }
+  put $ g { levels = Z.replace ne ls }
 
 -- display a menu to pick an item, and return the item and its index in the 
 -- list
 pickItem :: [Item] -> Game (Maybe (Int, Item))
 pickItem is = do
-  bs <- bounds `fmap` gets level
+  bs <- bounds `fmap` tilemap `fmap` Z.cursor `fmap` gets levels
   let iItems  = zip [0..] is
       letters = ['a'..]
   ch <- curses $ do
@@ -929,7 +992,9 @@ pickItem is = do
 playerDropItem :: Game ()
 playerDropItem = do
   g  <- get
-  p  <- fst `fmap` getPC `fmap` gets entities
+  ls <- gets levels
+  let l = Z.cursor ls
+      (p,_) = getPC (entities l)
   mi <- pickItem (storedItems (inv p))
   case mi of
     Nothing    -> return ()
@@ -939,7 +1004,8 @@ playerDropItem = do
         then
           addMessage "There's no room to drop anything there!"
         else do
-          put $ g { items = (pos p, i) : items g }
+          let nl = l { items = (pos p, i) : items l }
+          put $ g { levels = Z.replace nl ls } 
           modifyEntity p ( modifyInventory (removeStoredItemNth n)
                          . addEntityTime (itemUseCost p i))
           addMessage $ "You drop the " ++ iName i
@@ -947,7 +1013,7 @@ playerDropItem = do
 playerWieldItem :: Game ()
 playerWieldItem = do
   -- player
-  p <- fst `fmap` getPC `fmap` gets entities
+  p <- fst `fmap` getPC `fmap` entities `fmap` Z.cursor `fmap` gets levels
   -- pick an item in the inventory
   mi <- pickItem (storedItems (inv p))
   case mi of
@@ -976,9 +1042,10 @@ addItem i iv = iv { storedItems = i : storedItems iv }
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
 playerPickupItem = do
-  g <- get
-  let -- player and friends
-      (p, _) = getPC (entities g)
+  ls <- gets levels
+  let l = Z.cursor ls
+      -- player and friends
+      (p, _) = getPC (entities l)
   -- is there an item below us?
   is <- itemsAt (pos p)
   if length (storedItems (inv p)) >= 10
@@ -1078,20 +1145,23 @@ attackEntity atk def = do
 -- their deaths
 processNegativeHpEntities :: Game ()
 processNegativeHpEntities = do
-  g <- get
-  let died = filter (\e -> fst (hp e) <= 0) (entities g)
+  g  <- get
+  ls <- gets levels
+  let l = Z.cursor ls
+      died = filter (\e -> fst (hp e) <= 0) (entities l)
   unless (null died) $
            -- death messages
     do let dms  = map (\e -> name e ++ " dies!") died
            -- entities that are still alive
-           new  = filter (`notElem` died) (entities g)
+           new  = filter (`notElem` died) (entities l)
            -- create corpses to drop at the positions where
            -- the entities died
            corpses = map (\e -> (pos e, entityToCorpse e)) died
        -- add messages
        mapM_ addMessage dms
+       let nl = l { entities = new, items = items l ++ corpses }
        g' <- get
-       put $ g' { entities = new, items = items g' ++ corpses }
+       put $ g' { levels = Z.replace nl (levels g) }
 
 entityToCorpse :: Entity -> Item
 entityToCorpse e =
@@ -1144,10 +1214,9 @@ moveEntityAI :: [Entity]  -- rest of the enemies
              -> Entity    -- the entity we're moving
              -> Game () 
 moveEntityAI en' e = do
-  l  <- gets level
-  en <- gets entities
-      -- player position
-  let pp = pos (fst (getPC en))
+  l  <- Z.cursor `fmap` gets levels
+  let en = entities l
+      pp = pos (fst (getPC en))
       -- entity position
       ep = pos e
       -- sort the movement functions by the distance that they would
@@ -1155,7 +1224,7 @@ moveEntityAI en' e = do
       sorted_funs = map snd $ sortBy (comparing fst)
                      (zip (distances ep pp) directions)
       -- is this tile a good move?
-      goodmove ne = (l `walkableL` ne -- is the tile traversable?
+      goodmove ne = (tilemap l `walkableL` ne -- is the tile traversable?
                   -- is there an enemy on it?
                   && not (en' `anyEntityAt` ne))
                   -- we can also just stand still
@@ -1192,6 +1261,7 @@ runGame predf logicf = do
 main :: IO ()
 main = do
   g <- runGame quitCond gameTurn
+  print $ length (Z.toList (levels g))
   mapM_ print (reverse (msgs g))
 
 -- FOV init

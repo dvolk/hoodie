@@ -30,4 +30,5 @@ executable hoodie
                      , astar ==0.2.*
                      , ncurses ==0.2.*
                      , hfov ==1.0.*
+                     , ListZipper == 1.2.*
   GHC-Options: -Wall
