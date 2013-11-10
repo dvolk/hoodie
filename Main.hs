@@ -194,7 +194,7 @@ load :: Game ()
 load = io (readFile "saveFile") >>= io . readIO >>= put
 
 mkPlayer :: Vector2 -> IO Entity
-mkPlayer pos' = do
+mkPlayer pos' =
 --  pinv <- randInv
   return Entity 
          { pc       = True
@@ -533,8 +533,8 @@ displayHelp = do
       clear bs
       forM_ [1..length helpString] $ \y ->
         drawStringAt (1, y) $ center 80 (helpString !! (y-1))
-    waitForChrs "?"
-  return ()
+    _ <- waitForChrs "?"
+    return ()
 
 displayPlayerInventory :: Inventory -> Game ()
 displayPlayerInventory is = do
@@ -545,13 +545,13 @@ displayPlayerInventory is = do
     draw $ do
       clear bs
       drawStringAt (1,1) "Items:"
-      drawStringAt (1,2) $ "Wielded: " ++ iName (equWeapon is)
-      drawStringAt (1,3) $ "Worn: " ++ iName (equArmor is)
-      drawStringAt (1,4) $ "Active: " ++ iName (equMisc is)
-      forM_ iItems $ \(y, i) -> do
-        drawStringAt (1, y + 5) $ letters !! y : ". " ++ iName i
+      drawStringAt (1,2) $ " [Wielded] " ++ iName (equWeapon is)
+      drawStringAt (1,3) $ " [Worn] "    ++ iName (equArmor is)
+      drawStringAt (1,4) $ " [Active] "  ++ iName (equMisc is)
+      forM_ iItems $ \(y, i) ->
+        drawStringAt (1, y + 6) $ "  " ++ letters !! y : ". " ++ iName i
     render
-    _ <- waitForChrs $ ['A'..'z']
+    _ <- waitForChrs ['A'..'z']
     return ()
 
 withReverse :: Update () -> Update ()
@@ -658,7 +658,6 @@ movePlayer c = do
 
 itemsAt :: Vector2 -> Game [Item]
 itemsAt v = gets items >>= return . map snd . filter (\(p,_) -> p == v)
-  
 
 modifyEntityAt :: [Entity] -> Vector2 -> (Entity -> Entity) -> [Entity]
 modifyEntityAt es p f =
@@ -742,7 +741,7 @@ setQuit = do
 isPlayerDead :: Game ()
 isPlayerDead = do
   en <- gets entities 
-  let php = fst . hp .fst . getPC $ en
+  let php = fst . hp . fst . getPC $ en
   when (php <= 0) $ do
     addMessage "Oh no! You are dead!"
     setQuit
@@ -898,7 +897,7 @@ pickItem is = do
     draw $ do
       clear bs
       drawStringAt (1,1) "Items:"
-      forM_ iItems $ \(y, i) -> do
+      forM_ iItems $ \(y, i) ->
         drawStringAt (1, y + 2) $ letters !! y : ". " ++ iName i
     render
     waitForChrs ['A'..'z']
@@ -906,7 +905,7 @@ pickItem is = do
   if idx > length is || null is
     then do addMessage "No such item."
             return Nothing
-    else do return $ Just (idx, is !! idx)
+    else return $ Just (idx, is !! idx)
 
 -- the player can pick up items. 
   -- the item is removed from the floor
@@ -935,10 +934,15 @@ playerDropItem = do
   case mi of
     Nothing    -> return ()
     Just (n,i) -> do
-      put $ g { items = (pos p, i) : items g }
-      modifyEntity p ( modifyInventory (removeStoredItemNth n)
-                     . addEntityTime (itemUseCost p i))
-      addMessage $ "You drop the " ++ iName i
+      is <- itemsAt (pos p)
+      if length is >= 3
+        then
+          addMessage "There's no room to drop anything there!"
+        else do
+          put $ g { items = (pos p, i) : items g }
+          modifyEntity p ( modifyInventory (removeStoredItemNth n)
+                         . addEntityTime (itemUseCost p i))
+          addMessage $ "You drop the " ++ iName i
 
 playerWieldItem :: Game ()
 playerWieldItem = do
@@ -962,9 +966,9 @@ wieldItem :: Item -> Inventory -> Inventory
 wieldItem i iv =
   let (ww, wa, wm) = (equWeapon iv, equArmor iv, equMisc iv)
   in case iType i of
-      Weapon -> iv { equWeapon = i, storedItems = ww : (storedItems iv) }
-      Armor  -> iv { equArmor  = i, storedItems = wa : (storedItems iv) }
-      _      -> iv { equMisc   = i, storedItems = wm : (storedItems iv) }
+      Weapon -> iv { equWeapon = i, storedItems = ww : storedItems iv }
+      Armor  -> iv { equArmor  = i, storedItems = wa : storedItems iv }
+      _      -> iv { equMisc   = i, storedItems = wm : storedItems iv }
 
 addItem :: Item -> Inventory -> Inventory
 addItem i iv = iv { storedItems = i : storedItems iv }
@@ -979,7 +983,7 @@ playerPickupItem = do
   is <- itemsAt (pos p)
   if length (storedItems (inv p)) >= 10
     then addMessage "You can't carry anything more!"
-    else do
+    else
       case length is of
         0 -> addMessage "There's nothing here to pick up!"
         1 -> do 
