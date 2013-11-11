@@ -172,6 +172,7 @@ testEnemies =
   ,Entity False (0,0) 'b' "Bear" (13,13) undefined 120000 120 0 nullA nullA
   ,Entity False (0,0) 'd' "Dog" (3,3) undefined 8000 95 0 nullA nullA
   ,Entity False (0,0) 'a' "Armadillo" (1,1) undefined 1000 85 0 nullA nullA
+  ,Entity False (0,0) 'E' "Etsilopp" (10,10) undefined 100000 100 0 nullA nullA
   ]
 
 testBoss :: Entity
@@ -225,7 +226,7 @@ mkEnemiesOnLevel :: Int -- number of enemies
                  -> TileMap
                  -> IO [Entity]
 mkEnemiesOnLevel dl nm l = do
-  en <- randomRIO (0, 1 * dl) -- amount of enemies
+  en <- randomRIO (1 * dl, 3 * dl) -- amount of enemies
   es <- randFloors l en            -- positions
   ei <- replicateM en randInv      -- inventories
   em <- replicateM en (randomElem testEnemies) -- random enemies
@@ -243,62 +244,6 @@ mkItemsOnLevel l = do
   is <- replicateM i (randomElem testItems)
   ip <- randFloors l i
   return (zip ip is)
-
--- | Creates a brand-new, fully filled Game.
-mkDungeonLevel :: Game ()
-mkDungeonLevel = do
-  l  <- io $ mkRandRooms (80, 22) -- tilemap
-  p  <- io $ randFloor l          -- player position
-  ep <- io $ randFloor l          -- exit position
-  is <- io $ mkItemsOnLevel l     -- items
-  p' <- io $ mkPlayer p           -- player entity
-  enemies' <- io $ mkEnemiesOnLevel 1 0 l
-  let l' = Level 
-            { tilemap  = l
-            , stairs   = (p, ep)
-            , entities = p' : enemies'
-            , items    = is
-            , narr     = mkNeighbourArray l ".⋅+#SDk"
-            }
-  put GameState
-    { levels   = Z.insert l' Z.empty
-    , msgs     = [(0, False, "Welcome to hoodie! (press ? for help)")]
-    , turn     = 0
-    , pquit    = False
-    , dlvl     = 1
-    }
-
--- | changes all the things that need the change between floors
-descendLevel :: Game ()
-descendLevel = do
-  g  <- get
-  ls <- gets levels
-  l  <- cur `fmap` gets levels
-  let (p,_) = getPC (entities l) -- get player
-  -- check if there's a level below us already generated, otherwise make
-  -- a new level
-  ls' <- if Z.beginp ls
-           then do -- we're making a new level
-             tm <- io $ mkRandRooms (80,22)
-             pp <- io $ randFloor tm -- new player position
-             ep <- io $ randFloor tm -- exit position
-             is <- io $ mkItemsOnLevel tm
-             en <- io $ mkEnemiesOnLevel 1 (nextMove p + 1) tm
-             let p' = p { pos     = pp
-                        , seenL   = listArray ((1,1), (80,22)) (repeat False)
-                        , seeingL = listArray ((1,1), (80,22)) (repeat False)
-                        }
-             return $ Z.insert Level 
-               { tilemap  = tm
-               , stairs   = (pos p', ep)
-               , entities = p' : en
-               , items    = is
-               , narr     = mkNeighbourArray tm ".⋅+#SDk"
-               } ls
-           -- there's already a generated level below us, so just switch
-           else return $ Z.left ls
-  put $ g { levels = ls' 
-          , dlvl = 1 + dlvl g }
 
 -- | make a random pair within given bounds
 randomV2 :: (Vector2, Vector2) -> IO Vector2
@@ -713,37 +658,26 @@ addMessage m = do
   g <- get
   put $ g { msgs = (turn g, False, m) : msgs g }
 
-descend :: Game ()
-descend = do
-  level <- Z.cursor `fmap` gets levels
-  let exit = snd (stairs level)
-  if pos (fst (getPC (entities level))) == exit
-     then do
-       curses $ draw $ clear (bounds (tilemap level))
-       descendLevel
-       addMessage "You descend the stairs!"
-     else addMessage "There are no stairs here!"
+removePlayerFromCurLevel :: Game ()
+removePlayerFromCurLevel = do
+  g  <- get
+  ls <- gets levels
+  let l = Z.cursor ls
+      (_,en) = getPC (entities l)
+      l' = l { entities = en }
+  put $ g { levels = Z.replace l' ls }
 
-ascend :: Game ()
-ascend = do
-  g <- get
-  level <- Z.cursor `fmap` gets levels
-  let exit  = fst (stairs level)
-      (p,_) = getPC (entities level)
-  if Z.endp (Z.right (levels g))
-    then if pos (fst (getPC (entities level))) == exit
-            then addMessage "Are you sure you want to exit the dungeon?"
-            else addMessage "There are no up stairs here!"
-    else
-      if pos (fst (getPC (entities level))) == exit
-        then do
-          let prevexit = snd $ stairs $ Z.cursor $ Z.right $ levels g
-          curses $ draw $ clear (bounds (tilemap level))
-          put $ g { levels = Z.right (levels g) 
-                  , dlvl = dlvl g - 1 }
-          moveEntityTo p prevexit
-          addMessage "You ascend the stairs!"
-        else addMessage "There are no up stairs here!"
+addPlayerOnCurrentLevel :: Entity -> Game ()
+addPlayerOnCurrentLevel e = do
+  g  <- get
+  ls <- gets levels
+  let l = Z.cursor ls
+      l' = l { entities = e : entities l }
+  put $ g { levels = Z.replace l' ls }
+  
+ageEntities :: Int -> [Entity] -> [Entity]
+ageEntities n es =
+  map (\e -> e { nextMove = n }) es
           
 -- | merge the old "seen" array with the new "seeing" array
 -- to produce an updated "seen" array
@@ -809,6 +743,123 @@ setTurn = do
   g <- get
   p <- fst `fmap` getPC `fmap` entities `fmap` Z.cursor `fmap` gets levels
   put $ g { turn = nextMove p }
+
+-- | Creates a brand-new, fully filled Game.
+mkDungeonLevel :: Game ()
+mkDungeonLevel = do
+  l  <- io $ mkRandRooms (80, 22) -- tilemap
+  p  <- io $ randFloor l          -- player position
+  ep <- io $ randFloor l          -- exit position
+  is <- io $ mkItemsOnLevel l     -- items
+  p' <- io $ mkPlayer p           -- player entity
+  enemies' <- io $ mkEnemiesOnLevel 1 0 l
+  let l' = Level 
+            { tilemap  = l
+            , stairs   = (p, ep)
+            , entities = p' : enemies'
+            , items    = is
+            , narr     = mkNeighbourArray l ".⋅+#SDk"
+            }
+  put GameState
+    { levels   = Z.insert l' Z.empty
+    , msgs     = [(0, False, "Welcome to hoodie! (press ? for help)")]
+    , turn     = 0
+    , pquit    = False
+    , dlvl     = 1
+    }
+
+descend :: Game ()
+descend = do
+  level <- Z.cursor `fmap` gets levels
+  let exit = snd (stairs level)
+  if pos (fst (getPC (entities level))) == exit
+     then do
+       curses $ draw $ clear (bounds (tilemap level))
+       descendLevel
+       addMessage "You descend the stairs!"
+     else addMessage "There are no stairs here!"
+
+-- | changes all the things that need the change between floors
+descendLevel :: Game ()
+descendLevel = do
+  l <- cur `fmap` gets levels
+  let (p,_) = getPC (entities l) -- get current player
+  -- remove the player from the current level
+  removePlayerFromCurLevel
+  ls <- gets levels
+  -- check if there's a level below us already generated, otherwise make
+  -- a new level
+  (p'', ls'') <- if Z.beginp ls
+           then do -- we're making a new level
+             tm <- io $ mkRandRooms (80,22)
+             pp <- io $ randFloor tm -- new player position
+             ep <- io $ randFloor tm -- exit position
+             is <- io $ mkItemsOnLevel tm
+             en <- io $ mkEnemiesOnLevel 1 (nextMove p + 1) tm
+             let p' = p { pos     = pp
+                        , seenL   = listArray ((1,1), (80,22)) (repeat False)
+                        , seeingL = listArray ((1,1), (80,22)) (repeat False)
+                        }
+             return (p', Z.insert Level 
+               { tilemap  = tm
+               , stairs   = (pos p', ep)
+               , entities = en
+               , items    = is
+               , narr     = mkNeighbourArray tm ".⋅+#SDk"
+               } ls)
+           -- there's already a generated level below us, so just switch
+           else do
+             let l' = Z.cursor $ Z.left ls
+                 -- put the player on the up stairs of the level we're going to
+                 exit = fst $ stairs l'
+                 en = entities l'
+                 -- adjust the nextMove of all entities on the previous
+                 -- level to that of the player's current
+                 l'' = l' { entities = ageEntities (nextMove p + 1) en }
+                 -- move the player to the position of the up stairs on
+                 -- the next level
+                 p' = p { pos = exit 
+                        , seenL   = listArray ((1,1), (80,22)) (repeat False)
+                        , seeingL = listArray ((1,1), (80,22)) (repeat False)
+                        }
+             return (p', Z.replace l'' (Z.left ls))
+  g <- get
+  put $ g { levels = ls''
+          , dlvl = 1 + dlvl g }
+  addPlayerOnCurrentLevel p''
+
+-- | go up if we can
+ascend :: Game ()
+ascend = do
+  g <- get
+  level <- Z.cursor `fmap` gets levels
+  let exit  = fst (stairs level)
+      (p,_) = getPC (entities level)
+  if Z.endp (Z.right (levels g))
+    then if pos p == exit
+            then addMessage "Are you sure you want to exit the dungeon?"
+            else addMessage "There are no up stairs here!"
+    else
+      if pos p == exit
+        then do
+          let prevlevel = Z.cursor $ Z.right $ levels g
+              prevexit = snd $ stairs prevlevel
+              -- need to set the next move of entities on the previous level
+              -- the player's current
+              preven   = ageEntities (nextMove p) (entities prevlevel)
+              newp     = p { pos = prevexit                         
+                           , seenL   = listArray ((1,1), (80,22)) (repeat False)
+                           , seeingL = listArray ((1,1), (80,22)) (repeat False)
+                           }
+              newen    = newp : preven
+              newl     = prevlevel { entities = newen }
+          curses $ draw $ clear (bounds (tilemap level))
+          removePlayerFromCurLevel
+          g' <- get
+          put $ g' { levels = Z.replace newl $ Z.right (levels g')
+                  , dlvl = dlvl g' - 1 }
+          addMessage "You ascend the stairs!"
+        else addMessage "There are no up stairs here!"
   
 -- | This is the main update function, updating one entity per call. The
 -- entity to be updated is the one with the lowest nextMove value. When the
@@ -1261,8 +1312,8 @@ runGame predf logicf = do
 main :: IO ()
 main = do
   g <- runGame quitCond gameTurn
-  print $ length (Z.toList (levels g))
   mapM_ print (reverse (msgs g))
+  mapM_ (print . entities) (Z.toList (levels g))
 
 -- FOV init
 ioInit :: IO Settings
