@@ -232,7 +232,7 @@ mkEnemiesOnLevel dl nm l = do
   em <- replicateM en (randomElem testEnemies) -- random enemies
   ep <- randFloor l                -- position of boss, maybe
   bi <- randInv                    -- inventory of boss, maybe
-  return $ 
+  return $
     -- add the boss on the fifth level
     [testBoss { pos = ep, inv = bi, nextMove = nm } | dl == 5] ++ 
     -- add normal enemies
@@ -257,7 +257,7 @@ isFloor l p = l ! p `elem` ".⋅"
 
 -- | find a random part of the level that's walkable
 randFloor :: TileMap -> IO Vector2
-randFloor l = iterateUntil (isFloor l) (randomV2 (bounds l))
+randFloor l = randomV2 (bounds l) `satisfying` isFloor l
 
 -- | find n non-repeating random positions that are walkable
 randFloors :: TileMap -> Int -> IO [Vector2]
@@ -467,14 +467,17 @@ walkableL l p@(x,y) =
 displayMessageLog :: Game ()
 displayMessageLog = do
   g <- get
-  let bs@((x1,_), (x2,y2)) = bounds (tilemap (Z.cursor (levels g)))
-  curses $ draw $ do
-    clear bs
-    drawStringAt (1,1) "Message log: ('p' to return)"
-    forM_ (zip [3..] (take (y2 - 5) (msgs g))) $ \(n,(t,_,m)) ->
-      drawStringAt (x1, n) $ take (x2 - 5) "[" ++ show t ++ "] " ++ m
-  _ <- curses $ waitForChrs "p"
-  curses $ draw $ clear bs
+  let bs@(_, (x2,y2)) = bounds (tilemap (Z.cursor (levels g)))
+      ms = take (y2 -5) (msgs g)
+      pp = zip [3..] ms
+  curses $ do
+    draw $ do
+      clear bs
+      drawStringAt (1,1) "Message log: ('p' to return)"
+      forM_ pp $ \(y, (t, _, m)) ->
+        drawStringAt (1, y) $ take (x2 - 5) "[" ++ show t ++ "] " ++ m
+    _ <- waitForChrs "p"
+    draw $ clear bs
 
 helpString :: [String]
 helpString = ["Hello, hoodie here (press ? again to return)"
@@ -517,7 +520,7 @@ displayPlayerInventory is = do
       forM_ iItems $ \(y, i) ->
         drawStringAt (1, y + 6) $ "  " ++ letters !! y : ". " ++ iName i
     render
-    _ <- waitForChrs ['A'..'z']
+    _ <- waitForChrs $ ' ':['A'..'z']
     return ()
 
 withReverse :: Update () -> Update ()
@@ -550,11 +553,13 @@ drawEverything  = do
     -- draw level
     forM_ (indices tm) $ \i -> do 
       when (seen ! i) (drawStringAt i [tm ! i])
-      when (seeing ! i) (withReverse (drawStringAt i [tm ! i]))
---      drawStringAt i [tm ! i]
+    withReverse $
+      forM_ (indices tm) $ \i ->
+        when (seeing ! i) $
+          drawStringAt i [tm ! i]
     -- draw stairs
-    when (seeing ! u) $ drawStringAt u "<"
-    when (seeing ! d) $ drawStringAt d ">"
+    when (seen ! u) $ drawStringAt u "<"
+    when (seen ! d) $ drawStringAt d ">"
     -- draw items
     forM_ (items l) $ \(ip,i) -> 
       when (seeing ! ip) (drawStringAt ip [itemSym i])
@@ -619,13 +624,15 @@ movePlayer c = do
       Nothing ->
         if tm `walkableL` newp
           then do
+            -- print a message if there are items under the player
             is <- itemsAt newp
             case length is of
               0 -> return ()
               1 -> addMessage $ "You see here " ++ iName (head is)
-              _ -> addMessage $ "You see here " ++ 
-                    concatMap (\i -> iName i ++ ", ") (init is)
-                    ++ "and " ++ iName (last is)
+              _ -> when (pos p /= newp) $ do
+                    addMessage $ "You see here " ++ 
+                      concatMap (\i -> iName i ++ ", ") (init is)
+                      ++ "and " ++ iName (last is)
             p `moveEntityTo` newp
           else addMessage "You bump into an obstacle!"
 
@@ -634,18 +641,11 @@ itemsAt v = do
   l <- items `fmap` Z.cursor `fmap` gets levels
   return $ map snd $ filter (\(p,_) -> p == v) l
 
-modifyEntityAt :: [Entity] -> Vector2 -> (Entity -> Entity) -> [Entity]
-modifyEntityAt es p f =
-  map (\e -> if e == fromJust (es `getEntityAt` p) then f e else e) es
-
 modifyEntityHp :: Int -> Entity -> Entity
 modifyEntityHp n e = 
   let (hp', maxhp') = hp e
       newhp = min maxhp' (hp' + n)
   in e { hp = (newhp, maxhp') }
-
-removeEntityAt :: [Entity] -> Vector2 -> [Entity]
-removeEntityAt es p = filter (\e -> pos e /= p) es
 
 getEntityAt :: [Entity] -> Vector2 -> Maybe Entity
 getEntityAt es p = find (\e -> pos e == p) es
@@ -674,7 +674,7 @@ addPlayerOnCurrentLevel e = do
   let l = Z.cursor ls
       l' = l { entities = e : entities l }
   put $ g { levels = Z.replace l' ls }
-  
+
 ageEntities :: Int -> [Entity] -> [Entity]
 ageEntities n es =
   map (\e -> e { nextMove = n }) es
@@ -729,8 +729,7 @@ setQuit = do
 -- | Checks if the player is dead and quits if they are.
 isPlayerDead :: Game ()
 isPlayerDead = do
-  en <- entities `fmap` Z.cursor `fmap` gets levels
-  let php = fst . hp . fst . getPC $ en
+  php <- fst `fmap` hp `fmap` fst `fmap` getPC `fmap` entities `fmap` Z.cursor `fmap` gets levels
   when (php <= 0) $ do
     addMessage "Oh no! You are dead!"
     setQuit
@@ -777,7 +776,7 @@ descend = do
        curses $ draw $ clear (bounds (tilemap level))
        descendLevel
        addMessage "You descend the stairs!"
-     else addMessage "There are no stairs here!"
+     else addMessage "There are no down stairs here!"
 
 -- | changes all the things that need the change between floors
 descendLevel :: Game ()
@@ -800,6 +799,7 @@ descendLevel = do
                         , seenL   = listArray ((1,1), (80,22)) (repeat False)
                         , seeingL = listArray ((1,1), (80,22)) (repeat False)
                         }
+             -- insert the level at the cursor
              return (p', Z.insert Level 
                { tilemap  = tm
                , stairs   = (pos p', ep)
@@ -826,6 +826,7 @@ descendLevel = do
   g <- get
   put $ g { levels = ls''
           , dlvl = 1 + dlvl g }
+  -- add the player back on the new level
   addPlayerOnCurrentLevel p''
 
 -- | go up if we can
@@ -844,18 +845,25 @@ ascend = do
         then do
           let prevlevel = Z.cursor $ Z.right $ levels g
               prevexit = snd $ stairs prevlevel
-              -- need to set the next move of entities on the previous level
+              -- need to set the next move time of entities on the previous level
               -- the player's current
               preven   = ageEntities (nextMove p) (entities prevlevel)
+              -- set the player's location to the previous' level down stairs
+              -- and reset the vision
               newp     = p { pos = prevexit                         
                            , seenL   = listArray ((1,1), (80,22)) (repeat False)
                            , seeingL = listArray ((1,1), (80,22)) (repeat False)
                            }
+              -- add the player to the list of the entities on the previous
+              -- level
               newen    = newp : preven
               newl     = prevlevel { entities = newen }
           curses $ draw $ clear (bounds (tilemap level))
+          -- remove the player from the current level
           removePlayerFromCurLevel
           g' <- get
+          -- and put him in the one we're going to, and decrement the
+          -- dungeon level 
           put $ g' { levels = Z.replace newl $ Z.right (levels g')
                   , dlvl = dlvl g' - 1 }
           addMessage "You ascend the stairs!"

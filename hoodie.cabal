@@ -26,9 +26,9 @@ executable hoodie
                      , array ==0.4.*
                      , containers ==0.5.*
                      , random ==1.0.*
+                     , ListZipper == 1.2.*
                      , monad-loops ==0.4.*
                      , astar ==0.2.*
                      , ncurses ==0.2.*
                      , hfov ==1.0.*
-                     , ListZipper == 1.2.*
   GHC-Options: -Wall
