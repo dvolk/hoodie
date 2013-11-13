@@ -87,6 +87,7 @@ data Entity = Entity
     , name     :: String
     , hp       :: (Int, Int)
     , inv      :: Inventory
+    , stats    :: EntityStats
     , weight   :: Int -- mass in grams
     , speed    :: Int
     , nextMove :: Int
@@ -164,21 +165,36 @@ noWeapon = Item Weapon "Prosthetic Fists" 100 1 0 0 None
 noArmor  = Item Armor "Wizard's Cape" 100 0 0 0 None
 noMisc   = Item Scroll "New York Times Magazine" 100 0 0 0 None
 
+defaultStats :: EntityStats
+defaultStats = EntityStats
+  { strength = 8
+  , agility = 8
+  , intelligence = 8
+  , beauty = 8
+  }
+
 testEnemies :: [Entity]
 testEnemies = 
-  [Entity False (0,0) 'L' "Lamar" (5,5) undefined 30000 50 0 nullA nullA
-  ,Entity False (0,0) 'A' "Giant Ant" (7,7) undefined 10000 99 0 nullA nullA
-  ,Entity False (0,0) 'm' "Mom" (8,8) undefined 60000 101 0 nullA nullA
-  ,Entity False (0,0) 'b' "Bear" (13,13) undefined 120000 120 0 nullA nullA
-  ,Entity False (0,0) 'd' "Dog" (3,3) undefined 8000 95 0 nullA nullA
-  ,Entity False (0,0) 'a' "Armadillo" (1,1) undefined 1000 85 0 nullA nullA
-  ,Entity False (0,0) 'E' "Etsilopp" (10,10) undefined 100000 100 0 nullA nullA
+  [Entity False (0,0) 'L' "Lamar" (5,5) undefined defaultStats 
+   30000 50 0 nullA nullA
+  ,Entity False (0,0) 'A' "Giant Ant" (7,7) undefined defaultStats 
+   10000 99 0 nullA nullA
+  ,Entity False (0,0) 'm' "Mom" (8,8) undefined defaultStats 
+   60000 101 0 nullA nullA
+  ,Entity False (0,0) 'b' "Bear" (13,13) undefined defaultStats 
+   120000 120 0 nullA nullA
+  ,Entity False (0,0) 'd' "Dog" (3,3) undefined defaultStats 
+   8000 95 0 nullA nullA
+  ,Entity False (0,0) 'a' "Armadillo" (1,1) undefined defaultStats 
+   1000 85 0 nullA nullA
+  ,Entity False (0,0) 'E' "Etsilopp" (10,10) undefined defaultStats 
+   100000 100 0 nullA nullA
   ]
 
 testBoss :: Entity
 testBoss = 
   Entity False (0,0) 'G' "Dreadlord Gates" (32,32) 
-   undefined 75000 135 0 nullA nullA
+   undefined defaultStats 75000 135 0 nullA nullA
 
 testItems :: [Item]
 testItems = testWeapons ++ testArmors ++ testMisc
@@ -213,12 +229,17 @@ mkPlayer pos' =
          , sym      = '@'
          , hp       = (20, 20)
          , inv      = Inventory noWeapon noArmor noMisc [] 
+         , stats    = defaultStats
          , weight   = 75000
          , speed    = 100
          , nextMove = 0
          , seenL    = listArray ((1,1), (80,22)) (repeat False)
          , seeingL  = listArray ((1,1), (80,22)) (repeat False)
          }
+
+-- max carry weight is 5kg per strength point
+maxCarryWeight :: Entity -> Int
+maxCarryWeight e = 5000 * (strength (stats e))
 
 mkEnemiesOnLevel :: Int -- number of enemies
                  -> Int -- nextMove of enemies, set to the nextMove of the player
@@ -505,20 +526,30 @@ displayHelp = do
     _ <- waitForChrs "?"
     return ()
 
-displayPlayerInventory :: Inventory -> Game ()
-displayPlayerInventory is = do
-  bs <- bounds `fmap` tilemap `fmap` Z.cursor `fmap` gets levels
-  let iItems  = zip [0..] (storedItems is)
+displayPlayerInventory :: Game ()
+displayPlayerInventory = do
+  l <- Z.cursor `fmap` gets levels
+  
+  let p       = fst (getPC (entities l))
+      iItems  = zip [0..] (storedItems (inv p))
+      w       = equWeapon (inv p)
+      a       = equArmor (inv p)
+      m       = equMisc (inv p)
       letters = ['a'..]
+  
   curses $ do
     draw $ do
-      clear bs
-      drawStringAt (1,1) "Items:"
-      drawStringAt (1,2) $ " [Wielded] " ++ iName (equWeapon is)
-      drawStringAt (1,3) $ " [Worn] "    ++ iName (equArmor is)
-      drawStringAt (1,4) $ " [Active] "  ++ iName (equMisc is)
+      clear (bounds (tilemap l))
+      let cw = sum $ map iWeight (w:a:m:storedItems (inv p))
+      let mw = maxCarryWeight p
+      drawStringAt (1,1) $ 
+        "Inventory. (current weight: " ++ show cw ++ " max: " ++ show mw ++ ")"
+      drawStringAt (1,2) "Items:"
+      drawStringAt (1,3) $ " [Wielded] " ++ iName w
+      drawStringAt (1,4) $ " [Worn] "    ++ iName a
+      drawStringAt (1,5) $ " [Active] "  ++ iName m
       forM_ iItems $ \(y, i) ->
-        drawStringAt (1, y + 6) $ "  " ++ letters !! y : ". " ++ iName i
+        drawStringAt (1, y + 7) $ "  " ++ letters !! y : ". " ++ iName i
     render
     _ <- waitForChrs $ ' ':['A'..'z']
     return ()
@@ -891,7 +922,7 @@ gameTurn = do
         ',' -> playerPickupItem
         'd' -> playerDropItem
         'a' -> entityApplyItem e
-        'i' -> displayPlayerInventory (inv e)
+        'i' -> displayPlayerInventory
         'e' -> playerWieldItem
         'r' -> mkDungeonLevel >> updateVision
         '>' -> descend >> updateVision
