@@ -241,6 +241,9 @@ mkPlayer pos' =
 maxCarryWeight :: Entity -> Int
 maxCarryWeight e = 5000 * (strength (stats e))
 
+itemWeight :: [Item] -> Int
+itemWeight = sum . map iWeight
+
 mkEnemiesOnLevel :: Int -- number of enemies
                  -> Int -- nextMove of enemies, set to the nextMove of the player
                  -- when descending the dungeon
@@ -1129,6 +1132,10 @@ wieldItem i iv =
 addItem :: Item -> Inventory -> Inventory
 addItem i iv = iv { storedItems = i : storedItems iv }
 
+entityItems :: Entity -> [Item]
+entityItems e = 
+  [equWeapon (inv e), equArmor (inv e), equMisc (inv e)] ++ storedItems (inv e)
+
 -- | Pick up an item, if there is one below the player.
 playerPickupItem :: Game ()
 playerPickupItem = do
@@ -1138,7 +1145,8 @@ playerPickupItem = do
       (p, _) = getPC (entities l)
   -- is there an item below us?
   is <- itemsAt (pos p)
-  if length (storedItems (inv p)) >= 10
+  if length (storedItems (inv p)) >= 10 
+   || itemWeight (entityItems p) >= maxCarryWeight p
     then addMessage "You can't carry anything more!"
     else
       case length is of
