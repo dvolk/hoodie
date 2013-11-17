@@ -71,6 +71,7 @@ data Item = Item
     , iDefence :: Int
     , iWeight  :: Int -- mass in grams
     , iEffect  :: ItemEffect
+    , iCharge  :: Int
     } deriving (Eq, Show, Read)
 
 data Inventory = Inventory
@@ -139,31 +140,31 @@ nullA :: Array Vector2 Bool
 nullA = listArray ((1,1), (2,2)) (repeat False)
 
 testWeapons :: [Item]
-testWeapons = [Item Weapon "Sword of Test +1" 100 4 0 1500 None
-              ,Item Weapon "Shard of Glass" 150 2 0 300 None
-              ,Item Weapon "Staff of Skepticism" 50 10 0 4000 None
+testWeapons = [Item Weapon "Sword of Test +1" 100 4 0 1500 None 0
+              ,Item Weapon "Shard of Glass" 150 2 0 300 None 0
+              ,Item Weapon "Staff of Skepticism" 50 10 0 4000 None 0
               ]
 
 testArmors :: [Item]
-testArmors = [Item Armor "Tested Leather Armor" 100 0 2 5000 None
-             ,Item Armor "Fancy Suit" 150 0 1 2000 None
-             ,Item Armor "Power Armor mk2" 66 0 6 30000 None
+testArmors = [Item Armor "Tested Leather Armor" 100 0 2 5000 None 0
+             ,Item Armor "Fancy Suit" 150 0 1 2000 None 0
+             ,Item Armor "Power Armor mk2" 66 0 6 30000 None 0
              ]
 
 testMisc :: [Item]
-testMisc = [Item Scroll "Scroll of Modern Medicine" 100 0 0 100 (Healing 6)
-           ,Item Potion "Potion of Alcohol" 100 0 0 700 (Healing (-1))
-           ,Item Potion "Homeopathic Potion" 100 0 0 500 (Healing 0)
-           ,Item Scroll "Scroll of Death" 100 0 0 100 Death
-           ,Item Scroll "Book of Teleportation" 100 0 0 1000 Teleport
-           ,Item Corpse "Rodent Corpse" 100 0 0 1000 Yuck
-           ,Item Scroll "Book of Transmutation" 100 0 0 1000 Transmute
+testMisc = [Item Scroll "Scroll of Modern Medicine" 100 0 0 100 (Healing 6) 3
+           ,Item Potion "Potion of Alcohol" 100 0 0 700 (Healing (-1)) 3
+           ,Item Potion "Homeopathic Potion" 100 0 0 500 (Healing 0) 3
+           ,Item Scroll "Scroll of Death" 100 0 0 100 Death 3
+           ,Item Scroll "Book of Teleportation" 100 0 0 1000 Teleport 3
+           ,Item Corpse "Rodent Corpse" 100 0 0 1000 Yuck 3
+           ,Item Scroll "Book of Transmutation" 100 0 0 1000 Transmute 3
            ]
 
 noWeapon, noArmor, noMisc :: Item
-noWeapon = Item Weapon "Prosthetic Fists" 100 1 0 0 None
-noArmor  = Item Armor "Wizard's Cape" 100 0 0 0 None
-noMisc   = Item Scroll "New York Times Magazine" 100 0 0 0 None
+noWeapon = Item Weapon "Prosthetic Fists" 100 1 0 0 None 3
+noArmor  = Item Armor "Wizard's Cape" 100 0 0 0 None 3
+noMisc   = Item Scroll "New York Times Magazine" 100 0 0 0 None 0
 
 defaultStats :: EntityStats
 defaultStats = EntityStats
@@ -239,7 +240,7 @@ mkPlayer pos' =
 
 -- max carry weight is 5kg per strength point
 maxCarryWeight :: Entity -> Int
-maxCarryWeight e = 5000 * (strength (stats e))
+maxCarryWeight e = 5000 * strength (stats e)
 
 itemWeight :: [Item] -> Int
 itemWeight = sum . map iWeight
@@ -539,7 +540,8 @@ displayPlayerInventory = do
       a       = equArmor (inv p)
       m       = equMisc (inv p)
       letters = ['a'..]
-  
+      chargeStr i = 
+        if iType i `notElem` [Weapon, Armor] then " (" ++ show (iCharge i) ++ ")" else []
   curses $ do
     draw $ do
       clear (bounds (tilemap l))
@@ -550,9 +552,10 @@ displayPlayerInventory = do
       drawStringAt (1,2) "Items:"
       drawStringAt (1,3) $ " [Wielded] " ++ iName w
       drawStringAt (1,4) $ " [Worn] "    ++ iName a
-      drawStringAt (1,5) $ " [Active] "  ++ iName m
+      drawStringAt (1,5) $ " [Active] "  ++ iName m ++ chargeStr m
       forM_ iItems $ \(y, i) ->
         drawStringAt (1, y + 7) $ "  " ++ letters !! y : ". " ++ iName i
+          ++ chargeStr i
     render
     _ <- waitForChrs $ ' ':['A'..'z']
     return ()
@@ -585,7 +588,7 @@ drawEverything  = do
   curses $ draw $ do
     clear (bounds tm)
     -- draw level
-    forM_ (indices tm) $ \i -> do 
+    forM_ (indices tm) $ \i ->
       when (seen ! i) (drawStringAt i [tm ! i])
     withReverse $
       forM_ (indices tm) $ \i ->
@@ -663,7 +666,7 @@ movePlayer c = do
             case length is of
               0 -> return ()
               1 -> addMessage $ "You see here " ++ iName (head is)
-              _ -> when (pos p /= newp) $ do
+              _ -> when (pos p /= newp) $
                     addMessage $ "You see here " ++ 
                       concatMap (\i -> iName i ++ ", ") (init is)
                       ++ "and " ++ iName (last is)
@@ -924,7 +927,7 @@ gameTurn = do
         '?' -> displayHelp
         ',' -> playerPickupItem
         'd' -> playerDropItem
-        'a' -> entityApplyItem e
+        'a' -> entityUseItem e
         'i' -> displayPlayerInventory
         'e' -> playerWieldItem
         'r' -> mkDungeonLevel >> updateVision
@@ -958,17 +961,37 @@ modifyEntity e f = do
 itemUseCost :: Entity -> Item -> Int
 itemUseCost e i = 2000 `div` (speed e + iSpeed i)
 
+entityUseItem :: Entity -> Game ()
+entityUseItem e = do
+  let pm     = equMisc (inv e)
+      verb   = itemUseVerb pm
+      isPlayer = pc e
+  if iCharge pm >= 1
+    then entityApplyItem e
+    else when isPlayer $ addMessage $ "You can't " ++ verb ++ " that any more."
+
+useMiscItemCharges :: Int -> Entity -> Entity
+useMiscItemCharges n e = 
+  let is  = inv e
+      oi  = equMisc is
+      ni  = oi { iCharge = iCharge (equMisc is) - n }
+  in e { inv = is { equMisc = ni } }
+
+itemUseVerb :: Item -> String
+itemUseVerb i = 
+  case iType i of
+    Potion -> "drink"
+    Scroll -> "read"
+    Corpse -> "squeeze"
+    _      -> "use"
+    
 -- TODO: consume item or item charge on use
 -- | Use your misc item to do something
 entityApplyItem :: Entity -> Game ()
 entityApplyItem e = do
   g <- get
   let pm     = equMisc (inv e)
-      verb   = case iType pm of
-                 Potion -> "drink"
-                 Scroll -> "read"
-                 Corpse -> "squeeze"
-                 _      -> "use"
+      verb   = itemUseVerb pm
       isPlayer = pc e
       useMsg = 
         if isPlayer
@@ -983,12 +1006,14 @@ entityApplyItem e = do
     None      -> do
       addMessage useMsg
       when isPlayer $ addMessage "You reflect on your life..."
-      modifyEntity e ( addEntityTime (itemUseCost e pm))
+      modifyEntity e ( addEntityTime (itemUseCost e pm)
+                     . useMiscItemCharges 1)
     -- item heals (or hurts)
     Healing n -> do
       addMessage useMsg
       modifyEntity e ( modifyEntityHp n
-                     . addEntityTime (itemUseCost e pm))
+                     . addEntityTime (itemUseCost e pm)
+                     . useMiscItemCharges 1)
     -- item kills entity (doh)
     Death     -> do
       -- always add useMsg
@@ -996,20 +1021,23 @@ entityApplyItem e = do
       -- only add these when the player uses items
       when isPlayer $ addMessage "You feel stupid!"
       modifyEntity e ( modifyEntityHp (-999)
-                     . addEntityTime (itemUseCost e pm))
+                     . addEntityTime (itemUseCost e pm)
+                     . useMiscItemCharges 1)
     -- item randomly teleports entity
     Teleport  -> do
       addMessage useMsg
       newp <- io $ randFloor (tilemap $ Z.cursor $ levels g) `satisfying` (/= pos e)
       modifyEntity e ( modifyEntityPos newp
-                     . addEntityTime (itemUseCost e pm))
+                     . addEntityTime (itemUseCost e pm)
+                     . useMiscItemCharges 1)
       addMessage "Woosh!"
       updateVision
     -- item does nothing
     Yuck      -> do
       addMessage useMsg
       when isPlayer $ addMessage "Yuck!"
-      modifyEntity e ( addEntityTime (itemUseCost e pm))
+      modifyEntity e ( addEntityTime (itemUseCost e pm)
+                     . useMiscItemCharges 1)
     -- item turns entity's weapon into another one
     Transmute -> do
       addMessage useMsg
@@ -1018,7 +1046,8 @@ entityApplyItem e = do
       newWeapon <- io $ randomElem testWeapons `satisfying` (/= curWeapon)
       -- equip it
       modifyEntity e ( modifyInventory (\i -> i { equWeapon = newWeapon })
-                     . addEntityTime (itemUseCost e pm))
+                     . addEntityTime (itemUseCost e pm)
+                     . useMiscItemCharges 1)
       when isPlayer $ addMessage $ "Your " ++ iName curWeapon 
                     ++ " turns into " ++ iName newWeapon ++ "!"
 
@@ -1207,8 +1236,8 @@ panicEntityAI e =
 processEnemies :: (Entity, [Entity]) -> Game ()
 processEnemies (e, en) = do
   let p = (fst . getPC) en
-  if panicEntityAI e
-     -- if the entity has low hp then use its misc item
+  if panicEntityAI e && iCharge (equMisc (inv e)) >= 1
+     -- if the entity has low hp then use its misc item if the item has charges
      then entityApplyItem e
      else 
        -- if the enemy is next to the player, attack, otherwise
@@ -1270,6 +1299,7 @@ entityToCorpse e =
        , iDefence = 0
        , iWeight  = weight e
        , iEffect  = Yuck
+       , iCharge  = 99
        }
 
 -- | cartesian distance function
