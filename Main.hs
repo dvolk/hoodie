@@ -918,6 +918,7 @@ gameTurn = do
   if isPC e 
     then do
       setTurn
+      testScreenSize
       drawEverything
       ageMessages
       c <- getGoodCh
@@ -1369,6 +1370,13 @@ moveEntityAI en' e = do
 quitCond :: Game Bool
 quitCond = liftM pquit get
 
+testScreenSize :: Game ()
+testScreenSize = do
+  (y, x) <- curses screenSize
+  when (y < 24 || x < 80) $
+    error $ "ERROR: Your terminal's size, " ++ show (x, y) ++ 
+            ", is too small. You need at least (80, 22)"
+
 runGame :: Game Bool    -- ^ end condition
         -> Game ()      -- ^ update function
         -> IO GameState -- ^ end state
@@ -1382,6 +1390,7 @@ runGame predf logicf = do
     setEcho False
     _ <- setCursorMode CursorInvisible
     runGame1 undefined $ do
+      testScreenSize
       mkDungeonLevel
       updateVision
       loop'
